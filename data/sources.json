@@ -1,0 +1,50 @@
+[
+  {
+    "doc_id": 1,
+    "file_name": "anc_guidelines_india_mohfw",
+    "file_type": "pdf",
+    "doc_title": "Training Manual on Care During Pregnancy and Child Birth",
+    "doc_language": "English",
+    "org_geographic_scope": "India",
+    "org_official_name": "Ministry of Health and Family Welfare",
+    "org_display_name": "MoHFW",
+    "doc_source": "https://nhsrcindia.org/sites/default/files/2021-12/Care%20During%20Pregnancy%20and%20Childbirth%20Training%20Manual%20for%20CHO%20at%20AB-HWC.pdf",
+    "doc_year_published": 2021,
+    "doc_num_pages": 80,
+    "doc_reference_order": 1,
+    "doc_description": "An Indian governing body's ANC guidelines",
+    "doc_intended_use": "Primary source, given doc is both regional and governing"
+  },
+  {
+    "doc_id": 2,
+    "file_name": "anc_guidelines_india_fogsi",
+    "file_type": "pdf",
+    "doc_title": "Routine Antenatal Care for the Healthy Pregnant Women",
+    "doc_language": "English",
+    "org_geographic_scope": "India",
+    "org_official_name": "Federation of Obstetric and Gynaecological Societies of India",
+    "org_display_name": "FOGSI",
+    "doc_source": "https://www.fogsi.org/wp-content/uploads/2024/08/Binder_Routine-Antenatal-Care-for-the-Healthy-Pregnant-Women.pdf",
+    "doc_year_published": 2024,
+    "doc_num_pages": 28,
+    "doc_reference_order": 2,
+    "doc_description": "An Indian professional organization's ANC guidelines",
+    "doc_intended_use": "Secondary source, given doc is regional yet professional organization"
+  },
+  {
+    "doc_id": 3,
+    "file_name": "anc_guidelines_global_who",
+    "file_type": "pdf",
+    "doc_title": "WHO antenatal care recommendations for a positive pregnancy experience",
+    "doc_language": "English",
+    "org_geographic_scope": "Global",
+    "org_official_name": "World Health Organization",
+    "org_display_name": "WHO",
+    "doc_source": "https://iris.who.int/server/api/core/bitstreams/cb09dd39-1cfc-432c-9baf-feb6a5c40aa4/content",
+    "doc_year_published": 2021,
+    "doc_num_pages": 40,
+    "doc_reference_order": 3,
+    "doc_description": "A global organization's ANC guidelines",
+    "doc_intended_use": "Tertiary source, given doc is global organization"
+  }
+]

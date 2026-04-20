@@ -1,0 +1,5 @@
+[project]
+name = "poshan-saathi"
+version = "0.1.0"
+description = "Prenatal nutrition RAG chatbot for women in India"
+requires-python = ">=3.11"

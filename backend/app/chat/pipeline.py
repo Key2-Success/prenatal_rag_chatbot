@@ -10,9 +10,9 @@ Flow for every /chat request:
   6. Return answer + source citations
 """
 
-import os
 from openai import OpenAI
 
+from backend.app.config import settings
 from backend.app.chat.guardrails import check_guardrails, FALLBACK_RESPONSE
 from backend.app.rag.retriever import retrieve_ordered
 from backend.app.models.schemas import ChatRequest, ChatResponse, Source
@@ -25,7 +25,7 @@ _client: OpenAI | None = None
 def get_client() -> OpenAI:
     global _client
     if _client is None:
-        _client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+        _client = OpenAI(api_key=settings.openai_api_key)
     return _client
 
 

@@ -10,9 +10,10 @@ Upgrade from the notebook:
 """
 
 import json
-from pathlib import Path
 from pypdf import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+from backend.app.config import settings
 
 # Tuned for ANC guidelines:
 # - 600 tokens ~ 450 words — enough for a full recommendation with context
@@ -20,7 +21,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 CHUNK_SIZE = 600
 CHUNK_OVERLAP = 100
 
-DATA_DIR = Path(__file__).resolve().parents[4] / "data"
+DATA_DIR = settings.data_dir
 SOURCES_PATH = DATA_DIR / "sources.json"
 
 

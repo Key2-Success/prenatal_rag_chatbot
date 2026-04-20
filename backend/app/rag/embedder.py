@@ -7,8 +7,9 @@ Why text-embedding-3-small over ada-002 (what LlamaIndex used by default):
   - 1536 dimensions (same as ada-002) — Pinecone index dimension stays the same
 """
 
-import os
 from openai import OpenAI
+
+from backend.app.config import settings
 
 EMBEDDING_MODEL = "text-embedding-3-small"
 EMBEDDING_DIMENSIONS = 1536
@@ -23,7 +24,7 @@ _client: OpenAI | None = None
 def get_client() -> OpenAI:
     global _client
     if _client is None:
-        _client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+        _client = OpenAI(api_key=settings.openai_api_key)
     return _client
 
 

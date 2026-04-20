@@ -12,9 +12,6 @@ Then open http://localhost:8000/docs for the interactive Swagger UI —
 you can test every endpoint directly in the browser, no extra tools needed.
 """
 
-from dotenv import load_dotenv
-load_dotenv()  # must be called before any os.environ access
-
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 

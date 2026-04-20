@@ -19,10 +19,10 @@ Key design decisions:
      results, tune down if you get too many "no results found" fallbacks.
 """
 
-import os
 import uuid
 from pinecone import Pinecone, ServerlessSpec
 
+from backend.app.config import settings
 from backend.app.rag.embedder import embed_query, EMBEDDING_DIMENSIONS
 
 SIMILARITY_THRESHOLD = 0.6
@@ -38,8 +38,8 @@ def get_index():
     """Lazily initialises and returns the Pinecone index."""
     global _pinecone_index
     if _pinecone_index is None:
-        pc = Pinecone(api_key=os.environ["PINECONE_API_KEY"])
-        index_name = os.environ["PINECONE_INDEX_NAME"]
+        pc = Pinecone(api_key=settings.pinecone_api_key)
+        index_name = settings.pinecone_index_name
 
         if index_name not in pc.list_indexes().names():
             pc.create_index(

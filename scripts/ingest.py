@@ -9,14 +9,10 @@ Think of it as "building the knowledge base" before the app goes live.
 """
 
 import sys
-import os
 from pathlib import Path
-from dotenv import load_dotenv
 
 # Allow running from the project root: python -m scripts.ingest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-load_dotenv()
 
 from backend.app.rag.chunker import chunk_all_pdfs
 from backend.app.rag.embedder import embed_texts

@@ -3,3 +3,14 @@ name = "poshan-saathi"
 version = "0.1.0"
 description = "Prenatal nutrition RAG chatbot for women in India"
 requires-python = ">=3.11"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+# Declare which directories are Python packages. After `pip install -e .`,
+# imports like `from backend.app.config import settings` work from any cwd,
+# which removes the need for sys.path manipulation in scripts/ingest.py.
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["backend*", "scripts*"]

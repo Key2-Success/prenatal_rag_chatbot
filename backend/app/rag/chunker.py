@@ -9,27 +9,20 @@ Upgrade from the notebook:
     chunk_overlap ensures context isn't lost at boundaries.
 """
 
-import json
+from pathlib import Path
+
 from pypdf import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from backend.app.config import settings
+from backend.app.sources import sources_by_filename
 
-# Tuned for ANC guidelines:
-# - 600 tokens ~ 450 words — enough for a full recommendation with context
-# - 100-char overlap preserves the tail of one chunk into the head of the next
+# Tuned for ANC guidelines. chunk_size/overlap are measured in CHARACTERS
+# (RecursiveCharacterTextSplitter's default length_function is len()).
+# ~600 chars ≈ 100–120 English words — enough for a full recommendation
+# with context, while staying well under the embedding model's token limit.
 CHUNK_SIZE = 600
 CHUNK_OVERLAP = 100
-
-DATA_DIR = settings.data_dir
-SOURCES_PATH = DATA_DIR / "sources.json"
-
-
-def load_sources() -> dict:
-    """Returns sources.json keyed by file_name for O(1) lookup."""
-    with open(SOURCES_PATH) as f:
-        sources = json.load(f)
-    return {s["file_name"]: s for s in sources}
 
 
 def extract_text_with_pages(pdf_path: Path) -> list[dict]:
@@ -41,8 +34,7 @@ def extract_text_with_pages(pdf_path: Path) -> list[dict]:
     reader = PdfReader(pdf_path)
     pages = []
     for i, page in enumerate(reader.pages, start=1):
-        text = page.extract_text() or ""
-        text = text.strip()
+        text = (page.extract_text() or "").strip()
         if text:
             pages.append({"text": text, "page_number": i})
     return pages
@@ -64,10 +56,8 @@ def chunk_pdf(file_name: str) -> list[dict]:
         "page_number": int,   # page where this chunk begins
     }
     """
-    sources = load_sources()
-    source_meta = sources[file_name]
-
-    pdf_path = DATA_DIR / f"{file_name}.pdf"
+    source_meta = sources_by_filename()[file_name]
+    pdf_path = settings.data_dir / f"{file_name}.pdf"
     pages = extract_text_with_pages(pdf_path)
 
     splitter = RecursiveCharacterTextSplitter(
@@ -78,12 +68,12 @@ def chunk_pdf(file_name: str) -> list[dict]:
 
     chunks = []
     for page in pages:
-        page_chunks = splitter.split_text(page["text"])
-        for chunk_text in page_chunks:
-            if len(chunk_text.strip()) < 50:  # skip noise (headers, page numbers)
+        for chunk_text in splitter.split_text(page["text"]):
+            cleaned = chunk_text.strip()
+            if len(cleaned) < 50:  # skip noise (headers, page numbers)
                 continue
             chunks.append({
-                "text": chunk_text.strip(),
+                "text": cleaned,
                 "source_file": file_name,
                 "org_display_name": source_meta["org_display_name"],
                 "doc_title": source_meta["doc_title"],
@@ -96,10 +86,9 @@ def chunk_pdf(file_name: str) -> list[dict]:
 
 
 def chunk_all_pdfs() -> list[dict]:
-    """Chunks all PDFs listed in sources.json. Called by the ingestion script."""
-    sources = load_sources()
+    """Chunks every PDF declared in sources.json."""
     all_chunks = []
-    for file_name in sources:
+    for file_name in sources_by_filename():
         print(f"Chunking {file_name}...")
         chunks = chunk_pdf(file_name)
         print(f"  → {len(chunks)} chunks")

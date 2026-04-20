@@ -23,13 +23,11 @@ import uuid
 from pinecone import Pinecone, ServerlessSpec
 
 from backend.app.config import settings
+from backend.app.sources import priority_order
 from backend.app.rag.embedder import embed_query, EMBEDDING_DIMENSIONS
 
 SIMILARITY_THRESHOLD = 0.6
 TOP_K = 5  # retrieve top 5 chunks per source before threshold filtering
-
-# Ordered list of source names matching doc_reference_order in sources.json
-SOURCE_PRIORITY_ORDER = ["MoHFW", "FOGSI", "WHO"]
 
 _pinecone_index = None
 
@@ -102,7 +100,7 @@ def retrieve_ordered(query: str) -> list[dict]:
     index = get_index()
     query_embedding = embed_query(query)
 
-    for source_name in SOURCE_PRIORITY_ORDER:
+    for source_name in priority_order():
         results = index.query(
             vector=query_embedding,
             top_k=TOP_K,

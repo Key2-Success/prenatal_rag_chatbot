@@ -1,18 +1,20 @@
 """
 ingest.py — One-time script to parse PDFs, embed chunks, and upsert to Pinecone.
 
-Run this ONCE after setting up your .env file:
+Prerequisite (one-time):
+    pip install -e .          # makes `backend.app.*` importable from anywhere
+
+Run:
     python -m scripts.ingest
 
-You don't run this on every server start — only when the source PDFs change.
-Think of it as "building the knowledge base" before the app goes live.
+Re-run only when the source PDFs change. Think of it as "building the
+knowledge base" before the app goes live.
+
+Note on idempotency: every chunk gets a fresh UUID at upsert time, so running
+this script twice doubles your index. If you need to re-ingest cleanly, delete
+the Pinecone index from the Pinecone console first (or we can add a --reset
+flag later).
 """
-
-import sys
-from pathlib import Path
-
-# Allow running from the project root: python -m scripts.ingest
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from backend.app.rag.chunker import chunk_all_pdfs
 from backend.app.rag.embedder import embed_texts

@@ -1,6 +1,6 @@
-from pydantic import BaseModel, Field
-from typing import Optional
 from enum import Enum
+
+from pydantic import BaseModel, Field
 
 
 class DietType(str, Enum):
@@ -30,13 +30,19 @@ class UserProfile(BaseModel):
     medical_conditions: list[MedicalCondition] = Field(default_factory=list)
 
     def to_context_string(self) -> str:
-        """Formats profile as a compact string for injection into LLM prompts."""
-        conditions = (
-            ", ".join(self.medical_conditions) if self.medical_conditions else "None"
-        )
+        """
+        Formats profile as a compact string for injection into LLM prompts.
+        We use .value on enums because f-string formatting of an Enum
+        renders as "DietType.vegetarian" in Python 3.11+, not the human-
+        readable string — which would confuse the model.
+        """
+        if self.medical_conditions:
+            conditions = ", ".join(c.value for c in self.medical_conditions)
+        else:
+            conditions = "None"
         return (
             f"Week of pregnancy: {self.pregnancy_week}, "
-            f"Diet: {self.diet_type}, "
+            f"Diet: {self.diet_type.value}, "
             f"Medical conditions: {conditions}, "
             f"Age: {self.age}, "
             f"Weight: {self.weight_kg}kg, "

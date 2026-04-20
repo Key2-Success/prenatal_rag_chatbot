@@ -60,9 +60,10 @@ def run_chat(request: ChatRequest) -> ChatResponse:
             guardrail_triggered=True,
         )
 
-    # Step 2: Retrieve — append diet to query for better semantic match
+    # Step 2: Retrieve — append diet to query for better semantic match.
+    # .value unwraps the Enum to its string ("Vegetarian" vs "DietType.vegetarian").
     augmented_query = (
-        f"{request.message} [Diet: {request.user_profile.diet_type}]"
+        f"{request.message} [Diet: {request.user_profile.diet_type.value}]"
     )
     chunks = retrieve_ordered(augmented_query)
 

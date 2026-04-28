@@ -1,20 +1,26 @@
 """
-guardrails.py — Two-layer safety checks applied before every LLM call.
+guardrails.py — Pre-LLM safety + scope checks.
 
-Layer 1 — Emergency guardrail:
-  Detects urgent medical symptoms. Returns a hard-coded redirect to
-  healthcare professionals. We do NOT call the LLM for these — it's
-  faster, cheaper, and more reliable.
+Two layers, each a keyword list compiled into a single word-boundary regex:
 
-Layer 2 — Scope guardrail:
-  Detects clearly off-topic questions (e.g. finance, politics).
-  Returns a polite out-of-scope response.
+  Emergency: detects urgent medical symptoms. Returns a hard-coded redirect
+    to healthcare professionals — no LLM call (faster, cheaper, more reliable
+    than relying on the model to do the right thing under stress).
 
-Design note: keyword matching is intentionally broad (we'd rather
-over-trigger a "go to a doctor" message than miss a real emergency).
+  Out-of-scope: detects clearly unrelated questions (finance, politics, etc).
+    Returns a polite redirect to in-scope topics.
+
+Why word-boundary regex (not substring match):
+  Substring `"blood" in "bloody mary"` returns True. Word boundaries make
+  the matcher fire on `blood` but not `bloody`, on `fit` (seizure) but not
+  `fitness`. Phrase keywords like "severe pain" still work — \b sits at
+  word edges, not at every letter.
 """
 
+import re
 from dataclasses import dataclass
+
+from backend.app.models.schemas import ResponseType
 
 EMERGENCY_RESPONSE = (
     "It sounds like you may be experiencing something urgent. "
@@ -22,55 +28,68 @@ EMERGENCY_RESPONSE = (
     "In India, you can call 108 for emergency medical services."
 )
 
-FALLBACK_RESPONSE = (
+OUT_OF_SCOPE_RESPONSE = (
     "I'm Poshan Saathi, a nutrition companion for pregnant women. "
-    "I can only help with questions about nutrition and antenatal care. "
-    "I don't have information about that topic."
+    "I can only help with questions about nutrition and antenatal care."
 )
 
-# Words that suggest a medical emergency or symptoms needing immediate care.
-# Erring on the side of over-detection is intentional.
-EMERGENCY_KEYWORDS = [
+NO_RESULTS_RESPONSE = (
+    "I'm Poshan Saathi, a nutrition companion for pregnant women. "
+    "I don't have information about that topic in my reference guidelines."
+)
+
+# Words/phrases suggesting a medical emergency. Erring on the side of
+# over-detection is intentional — we'd rather over-trigger "go to a doctor"
+# than miss a real emergency.
+EMERGENCY_KEYWORDS: tuple[str, ...] = (
     "bleeding", "blood", "severe pain", "can't breathe", "unconscious",
     "fainted", "seizure", "fit", "convulsion", "fever", "chest pain",
     "labour", "labor", "water broke", "waters broke", "no movement",
     "baby not moving", "emergency", "hospital", "ambulance", "urgent",
     "dizziness", "blurred vision", "swelling face", "headache severe",
-]
+)
 
-# Topics clearly outside prenatal/nutritional scope.
-OUT_OF_SCOPE_KEYWORDS = [
+# Topics clearly outside prenatal nutrition / antenatal care.
+OUT_OF_SCOPE_KEYWORDS: tuple[str, ...] = (
     "stock", "crypto", "bitcoin", "invest", "finance", "money",
     "politics", "election", "religion", "astrology", "recipe",
     "weather", "travel", "movie", "song", "celebrity",
-]
+)
 
 
-@dataclass
+def _compile(keywords: tuple[str, ...]) -> re.Pattern[str]:
+    """One alternation regex with word boundaries, case-insensitive."""
+    alternation = "|".join(re.escape(k) for k in keywords)
+    return re.compile(rf"\b(?:{alternation})\b", re.IGNORECASE)
+
+
+_EMERGENCY_RE = _compile(EMERGENCY_KEYWORDS)
+_OUT_OF_SCOPE_RE = _compile(OUT_OF_SCOPE_KEYWORDS)
+
+
+@dataclass(frozen=True)
 class GuardrailResult:
+    """Outcome of `check_guardrails`. `response_type` is None when nothing fired."""
     triggered: bool
+    response_type: ResponseType | None = None
     response: str | None = None
-    kind: str | None = None  # "emergency" | "out_of_scope"
 
 
 def check_guardrails(message: str) -> GuardrailResult:
     """
-    Checks message against emergency and out-of-scope keyword lists.
-    Returns a GuardrailResult — if triggered=True, use the response directly
-    and skip the RAG + LLM pipeline entirely.
+    Run both keyword checks. Emergency wins on any tie — if a message
+    looks both urgent and off-topic, the urgent path is the safer default.
     """
-    lowered = message.lower()
-
-    for keyword in EMERGENCY_KEYWORDS:
-        if keyword in lowered:
-            return GuardrailResult(
-                triggered=True, response=EMERGENCY_RESPONSE, kind="emergency"
-            )
-
-    for keyword in OUT_OF_SCOPE_KEYWORDS:
-        if keyword in lowered:
-            return GuardrailResult(
-                triggered=True, response=FALLBACK_RESPONSE, kind="out_of_scope"
-            )
-
+    if _EMERGENCY_RE.search(message):
+        return GuardrailResult(
+            triggered=True,
+            response_type=ResponseType.emergency,
+            response=EMERGENCY_RESPONSE,
+        )
+    if _OUT_OF_SCOPE_RE.search(message):
+        return GuardrailResult(
+            triggered=True,
+            response_type=ResponseType.out_of_scope,
+            response=OUT_OF_SCOPE_RESPONSE,
+        )
     return GuardrailResult(triggered=False)

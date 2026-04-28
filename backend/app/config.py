@@ -1,54 +1,82 @@
 """
-config.py — Single source of truth for project paths and environment variables.
+config.py — Project paths and environment-driven settings.
 
-Why pydantic-settings instead of plain os.environ:
-  - Validates all required env vars at startup, with a clear error if any are missing
-  - Type-coerces automatically (e.g. "true" → True for booleans)
-  - One place to see every config knob the app uses
+Two kinds of configuration live here, kept deliberately separate:
 
-Why walk up to find PROJECT_ROOT instead of parents[N]:
-  - parents[N] breaks silently if this file ever moves — wrong count, wrong path
-  - Walking up to the nearest pyproject.toml is location-independent: this file
-    can live anywhere in the tree and it will always find the true project root
+  1. Module constants (PROJECT_ROOT, DATA_DIR)
+     Derived from the codebase layout, not from the environment. Putting
+     these on Settings would imply they're env-tunable, which they aren't.
+
+  2. Settings (env vars + tunable runtime knobs)
+     Everything that can or must vary across environments — secrets,
+     model choices, retrieval thresholds. Validated once at startup.
+
+Why walk up to find PROJECT_ROOT instead of Path(__file__).parents[N]:
+  parents[N] silently breaks if this file moves; counting is fragile.
+  Walking up to the nearest pyproject.toml is location-independent.
 """
 
 from pathlib import Path
-from pydantic_settings import BaseSettings
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 def _find_project_root() -> Path:
-    """
-    Walk up the directory tree from this file until we find pyproject.toml.
-    That file sits at the project root and acts as an unambiguous marker.
-    Raises RuntimeError if we reach the filesystem root without finding it.
-    """
+    """Walk up from this file to the nearest pyproject.toml."""
     current = Path(__file__).resolve().parent
-    while current != current.parent:       # stop at filesystem root
+    while current != current.parent:
         if (current / "pyproject.toml").exists():
             return current
         current = current.parent
     raise RuntimeError(
         "Could not locate project root. "
-        "Make sure pyproject.toml exists at the root of the repository."
+        "pyproject.toml must exist at the repository root."
     )
 
 
-PROJECT_ROOT = _find_project_root()
+# --- Path constants (not env-configurable) -----------------------------------
 
+PROJECT_ROOT = _find_project_root()
+DATA_DIR = PROJECT_ROOT / "data"
+
+
+# --- Settings (env-configurable) ---------------------------------------------
 
 class Settings(BaseSettings):
-    # --- Required (must be in .env) ---
+    """
+    All values can be overridden via .env or process env vars.
+
+    The retrieval / LLM knobs default to production-sane values. Surfacing
+    them here (instead of as constants in retriever.py / pipeline.py) means
+    a tuning run can override one with `SIMILARITY_THRESHOLD=0.55 ...`
+    without touching code.
+    """
+
+    # --- Required secrets ---
     openai_api_key: str
     pinecone_api_key: str
 
-    # --- Optional with defaults ---
+    # --- App ---
     pinecone_index_name: str = "poshan-saathi"
     app_env: str = "development"
 
-    # --- Derived paths (computed, not from .env) ---
-    data_dir: Path = PROJECT_ROOT / "data"
+    # --- Retrieval knobs ---
+    # Pinecone cosine scores typically land in [0.0, 1.0] for related text.
+    # Lower → more recall, more noise. Higher → more precision, more fallbacks.
+    # Override per-run via env, e.g. `SIMILARITY_THRESHOLD=0.55 python -m eval.run_eval`.
+    similarity_threshold: float = 0.3
+    # Candidates fetched per source before threshold filtering.
+    top_k: int = 5
 
-    model_config = {"env_file": str(PROJECT_ROOT / ".env"), "extra": "ignore"}
+    # --- LLM knobs ---
+    llm_model: str = "gpt-4.1-nano"
+    # Lower temperature = more consistent, factual answers (good for medical).
+    llm_temperature: float = 0.3
+
+    model_config = SettingsConfigDict(
+        env_file=str(PROJECT_ROOT / ".env"),
+        extra="ignore",
+    )
 
 
 settings = Settings()

@@ -2,21 +2,23 @@
 main.py — FastAPI application entry point.
 
 Endpoints:
-  GET  /health          → liveness check
-  POST /chat            → main RAG chat endpoint
+  GET  /health  → liveness check
+  POST /chat    → main RAG chat endpoint
 
-To run locally:
+Local dev:
     uvicorn backend.app.main:app --reload
-
-Then open http://localhost:8000/docs for the interactive Swagger UI —
-you can test every endpoint directly in the browser, no extra tools needed.
+    open http://localhost:8000/docs   # interactive Swagger UI
 """
+
+import logging
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.app.models.schemas import ChatRequest, ChatResponse
 from backend.app.chat.pipeline import run_chat
+from backend.app.models.schemas import ChatRequest, ChatResponse
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Poshan Saathi API",
@@ -24,11 +26,11 @@ app = FastAPI(
     version="0.1.0",
 )
 
-# CORS: allows the Next.js frontend (running on localhost:3000 in dev,
-# or your Vercel domain in prod) to call this API.
+# CORS: allow the Next.js frontend (localhost:3000 in dev, your Vercel
+# domain in prod). Tighten allow_origins before going live.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],  # tighten this to your domain in prod
+    allow_origins=["http://localhost:3000"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -36,7 +38,7 @@ app.add_middleware(
 
 @app.get("/health", tags=["Meta"])
 def health():
-    """Quick liveness check. Returns 200 if the server is up."""
+    """Liveness check. 200 means the process is up."""
     return {"status": "ok"}
 
 
@@ -45,15 +47,14 @@ def chat(request: ChatRequest):
     """
     Main chat endpoint.
 
-    Accepts a message + full user profile, runs the RAG pipeline,
-    and returns an answer with source citations.
-
-    FastAPI automatically validates the request body against ChatRequest
-    (Pydantic) and returns a 422 with clear error messages if anything
-    is missing or the wrong type — no manual validation needed.
+    FastAPI auto-validates the request body against `ChatRequest` (Pydantic)
+    and returns 422 with field-level errors if anything is missing or wrong.
     """
     try:
         return run_chat(request)
-    except Exception as e:
-        # In production you'd log this properly (e.g. with structlog or Sentry)
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        # Log internally with traceback — never echo internals to clients.
+        # Client gets a generic message; the request id (added by your
+        # middleware in prod) makes server logs cross-referenceable.
+        logger.exception("run_chat failed")
+        raise HTTPException(status_code=500, detail="Internal server error")

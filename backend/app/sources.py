@@ -1,43 +1,77 @@
 """
-sources.py — Single loader for data/sources.json.
+sources.py — Typed loader for data/sources.json.
 
-Both chunker.py (at ingestion time) and retriever.py (at query time)
-need information from sources.json. Putting the loader here means:
-  - One file owns the schema of sources.json
-  - Priority order is derived from the file, not duplicated in code
-  - Adding/removing/reordering sources is a one-file edit
+Both chunker.py (at ingestion time) and retriever.py (at query time) need
+information from sources.json. This module owns:
 
-lru_cache means the JSON is parsed once per process.
+  - The schema (Source) — declared once, validated at load
+  - The single load (lru_cache) — the JSON is parsed exactly once per process
+  - Derived views (sources_by_filename, priority_order)
+
+Adding/removing/reordering sources is a one-file edit (sources.json).
+Renaming a JSON field will fail loudly here, at startup, instead of
+silently breaking a downstream KeyError at retrieval time.
 """
 
 import json
 from functools import lru_cache
 
-from backend.app.config import settings
+from pydantic import BaseModel, ConfigDict, Field
+
+from backend.app.config import DATA_DIR
+
+
+class Source(BaseModel):
+    """One row of data/sources.json."""
+
+    # Strict: any unexpected key in sources.json is almost certainly a typo
+    # we want to hear about, not silently ignore.
+    model_config = ConfigDict(extra="forbid")
+
+    doc_id: int
+    file_name: str
+    file_type: str
+    doc_title: str
+    doc_language: str
+    org_geographic_scope: str
+    org_official_name: str
+    org_display_name: str
+    doc_source: str
+    doc_year_published: int
+    doc_num_pages: int
+    # Lower number = higher priority (1 wins over 2). Validated > 0 to make
+    # zero/negative values impossible — they'd silently sort to the front.
+    doc_reference_order: int = Field(..., gt=0)
+    doc_description: str
+    doc_intended_use: str
 
 
 @lru_cache(maxsize=1)
-def load_sources() -> list[dict]:
+def load_sources() -> tuple[Source, ...]:
     """
-    Returns every source dict from sources.json,
-    sorted by doc_reference_order (1 = highest priority).
+    Parse sources.json and return all sources sorted by priority.
+
+    Returns a tuple (not a list) so callers can't accidentally mutate the
+    cached value and corrupt every subsequent call.
     """
-    with open(settings.data_dir / "sources.json") as f:
-        sources = json.load(f)
-    return sorted(sources, key=lambda s: s["doc_reference_order"])
+    with open(DATA_DIR / "sources.json") as f:
+        raw = json.load(f)
+    sources = [Source(**row) for row in raw]
+    sources.sort(key=lambda s: s.doc_reference_order)
+    return tuple(sources)
 
 
 @lru_cache(maxsize=1)
-def sources_by_filename() -> dict[str, dict]:
+def sources_by_filename() -> dict[str, Source]:
     """Sources keyed by file_name — used at chunking time to look up metadata."""
-    return {s["file_name"]: s for s in load_sources()}
+    return {s.file_name: s for s in load_sources()}
 
 
 @lru_cache(maxsize=1)
-def priority_order() -> list[str]:
+def priority_order() -> tuple[str, ...]:
     """
-    org_display_names in priority order.
-    Derived from sources.json so retrieval order follows the data, not hardcoded.
-    e.g. ["MoHFW", "FOGSI", "WHO"]
+    Org display names in priority order, e.g. ("MoHFW", "FOGSI", "WHO").
+
+    Tuple (not list) so callers can't mutate the cached order.
     """
-    return [s["org_display_name"] for s in load_sources()]
+    return tuple(s.org_display_name for s in load_sources())

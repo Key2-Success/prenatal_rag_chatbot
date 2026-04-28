@@ -33,3 +33,9 @@ out/
 
 # Logs
 *.log
+
+# Claude Code session/local settings
+.claude/
+
+# Eval run artifacts (generated locally; don't churn the repo)
+eval/results/

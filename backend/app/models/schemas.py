@@ -1,7 +1,17 @@
+"""
+schemas.py — Pydantic models for the chat API.
+
+Every value that crosses an external boundary (HTTP request, HTTP response,
+or a YAML/JSON file) gets a Pydantic model defined here or in a peer module.
+Internal data flow uses these same models — there's no shadow set of dicts.
+"""
+
 from enum import Enum
 
 from pydantic import BaseModel, Field
 
+
+# --- Enums -------------------------------------------------------------------
 
 class DietType(str, Enum):
     non_vegetarian = "Non-Vegetarian"
@@ -15,12 +25,34 @@ class MedicalCondition(str, Enum):
     diabetes = "Diabetes"
 
 
-# --- User Profile ---
-# Mirrors the UserProfile class from the notebook, but as a Pydantic model.
-# Pydantic automatically validates types and provides helpful error messages
-# when the frontend sends bad data (e.g. age as a string).
+class ResponseType(str, Enum):
+    """
+    What type of response the pipeline produced. A single discriminator
+    makes downstream code (frontend, eval) trivial:
+
+        if response.response_type is ResponseType.emergency: show red banner
+        if response.response_type is ResponseType.answer:    show sources
+
+    Rather than:
+
+        if response.guardrail_triggered and response.answer == EMERGENCY_RESPONSE: ...
+
+    which is what the previous dual-bool design required.
+    """
+    answer = "answer"             # LLM-generated answer with sources
+    emergency = "emergency"       # safety guardrail tripped
+    out_of_scope = "out_of_scope"  # off-topic guardrail tripped
+    no_results = "no_results"     # retrieval found nothing above threshold
+
+
+# --- User profile ------------------------------------------------------------
 
 class UserProfile(BaseModel):
+    """
+    The clinical + lifestyle context attached to every chat request. Used
+    both to personalise retrieval (diet appended to query) and to ground
+    the LLM's answer (injected into the prompt).
+    """
     name: str = Field(..., min_length=1, max_length=100)
     age: int = Field(..., ge=10, le=60)
     pregnancy_week: int = Field(..., ge=1, le=45)
@@ -30,12 +62,7 @@ class UserProfile(BaseModel):
     medical_conditions: list[MedicalCondition] = Field(default_factory=list)
 
     def to_context_string(self) -> str:
-        """
-        Formats profile as a compact string for injection into LLM prompts.
-        We use .value on enums because f-string formatting of an Enum
-        renders as "DietType.vegetarian" in Python 3.11+, not the human-
-        readable string — which would confuse the model.
-        """
+        """Compact, human-readable summary for injection into the LLM prompt."""
         if self.medical_conditions:
             conditions = ", ".join(c.value for c in self.medical_conditions)
         else:
@@ -50,7 +77,7 @@ class UserProfile(BaseModel):
         )
 
 
-# --- Chat ---
+# --- Chat request / response ------------------------------------------------
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=1000)
@@ -58,6 +85,7 @@ class ChatRequest(BaseModel):
 
 
 class Source(BaseModel):
+    """A citation surfaced alongside an answer."""
     org_display_name: str
     doc_title: str
     page: int
@@ -65,7 +93,13 @@ class Source(BaseModel):
 
 
 class ChatResponse(BaseModel):
+    """
+    The single shape returned by /chat.
+
+    `response_type` is the source of truth for what happened. `sources` is
+    non-empty only when response_type == answer. The frontend should branch
+    on `response_type`, never parse the answer text.
+    """
+    response_type: ResponseType
     answer: str
-    sources: list[Source]
-    guardrail_triggered: bool = False
-    fallback_triggered: bool = False
+    sources: list[Source] = Field(default_factory=list)

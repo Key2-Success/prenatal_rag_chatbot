@@ -17,3 +17,6 @@ pandas==2.2.3
 # Testing
 pytest==8.3.4
 httpx==0.28.1
+
+# Evaluation
+pyyaml==6.0.2

@@ -1,0 +1,49 @@
+# user_profiles.yaml — shared user personas for the evaluation suite.
+#
+# Each test case in test_cases.yaml references one of these by key.
+# Personas are designed to cover the dimensions that should affect the
+# answer: diet type, trimester, and medical conditions.
+
+priya:
+  # Default persona. Vegetarian, mid-pregnancy, mild deficiency.
+  # Used as the baseline for most "happy path" tests.
+  name: Priya
+  age: 28
+  pregnancy_week: 20
+  diet_type: Vegetarian
+  weight_kg: 58.0
+  height_cm: 162.0
+  medical_conditions: [Low iron]
+
+anjali:
+  # Non-vegetarian, first trimester, no conditions.
+  # Counterpart to priya for testing diet-based personalization.
+  name: Anjali
+  age: 32
+  pregnancy_week: 8
+  diet_type: Non-Vegetarian
+  weight_kg: 65.0
+  height_cm: 165.0
+  medical_conditions: []
+
+meera:
+  # High-risk persona: late pregnancy, multiple conditions.
+  # Used for testing condition-aware answers (salt, sugar, etc.).
+  name: Meera
+  age: 35
+  pregnancy_week: 32
+  diet_type: Vegetarian
+  weight_kg: 72.0
+  height_cm: 158.0
+  medical_conditions: [Hypertension, Diabetes]
+
+sunita:
+  # Healthy first-trimester ovo-vegetarian. No conditions.
+  # Used to verify the system handles a "low-context" profile cleanly.
+  name: Sunita
+  age: 24
+  pregnancy_week: 12
+  diet_type: Ovo-Vegetarian
+  weight_kg: 55.0
+  height_cm: 160.0
+  medical_conditions: []

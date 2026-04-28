@@ -2,18 +2,24 @@
 pipeline.py — Orchestrates one /chat request end to end.
 
 Flow:
-  1. Guardrail check    → if tripped, return early (no LLM call)
+  1. Classify message   → emergency / out_of_scope / in_scope
+                          first two return canned responses (no retrieval, no answer LLM)
   2. Retrieve chunks    → Pinecone, ordered by source priority
   3. If empty           → no_results response
   4. Build prompt       → system instructions + user profile + retrieved context
-  5. Call LLM           → temperature from settings
+  5. Call answer LLM    → temperature from settings
   6. Return ChatResponse with response_type=answer + source citations
 
 The function exposed externally is `run_chat`. Everything else is private
 helpers — kept small so each step has one obvious responsibility.
 """
 
-from backend.app.chat.guardrails import NO_RESULTS_RESPONSE, check_guardrails
+from backend.app.chat.classifier import MessageClassification, classify_message
+from backend.app.chat.guardrails import (
+    EMERGENCY_RESPONSE,
+    NO_RESULTS_RESPONSE,
+    OUT_OF_SCOPE_RESPONSE,
+)
 from backend.app.clients import get_openai_client
 from backend.app.config import settings
 from backend.app.models.schemas import (
@@ -34,6 +40,14 @@ Rules:
 - Do not provide medical diagnoses or treatment decisions.
 - If the provided context does not contain enough information to answer, say so honestly.
 """
+
+# Map the classifier's routing labels to the (response_type, canned answer)
+# pair that short-circuits the pipeline. `in_scope` is intentionally absent
+# — it means "keep going", not "return early".
+_SHORT_CIRCUIT_BY_LABEL: dict[MessageClassification, tuple[ResponseType, str]] = {
+    MessageClassification.emergency: (ResponseType.emergency, EMERGENCY_RESPONSE),
+    MessageClassification.out_of_scope: (ResponseType.out_of_scope, OUT_OF_SCOPE_RESPONSE),
+}
 
 
 def augment_query(message: str, profile: UserProfile) -> str:
@@ -94,20 +108,19 @@ def _to_sources(chunks: list[RetrievedChunk]) -> list[Source]:
 
 
 def run_chat(request: ChatRequest) -> ChatResponse:
-    # 1. Guardrail check — short-circuit before spending money on retrieval/LLM.
-    guardrail = check_guardrails(request.message)
-    if guardrail.triggered:
-        assert guardrail.response_type is not None and guardrail.response is not None
-        return ChatResponse(
-            response_type=guardrail.response_type,
-            answer=guardrail.response,
-        )
+    # 1. Triage the message. Emergency / out_of_scope short-circuit before
+    #    any retrieval or answer-LLM cost.
+    label = classify_message(request.message)
+    short_circuit = _SHORT_CIRCUIT_BY_LABEL.get(label)
+    if short_circuit is not None:
+        response_type, canned = short_circuit
+        return ChatResponse(response_type=response_type, answer=canned)
 
     # 2. Retrieve.
     query = augment_query(request.message, request.user_profile)
     chunks = retrieve_ordered(query)
 
-    # 3. No relevant chunks → no_results fallback (still no LLM call).
+    # 3. No relevant chunks → no_results fallback (still no answer-LLM call).
     if not chunks:
         return ChatResponse(
             response_type=ResponseType.no_results,

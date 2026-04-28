@@ -73,6 +73,15 @@ class Settings(BaseSettings):
     # Lower temperature = more consistent, factual answers (good for medical).
     llm_temperature: float = 0.3
 
+    # --- Classifier knobs ---
+    # Triage LLM that labels each incoming message as in_scope / emergency /
+    # out_of_scope before retrieval. Kept separate from llm_model so we can
+    # use the cheapest viable model for triage and a stronger one for answers.
+    classifier_model: str = "gpt-4.1-nano"
+    # Triage is a routing decision — we want the same input to always get the
+    # same label, so default to deterministic.
+    classifier_temperature: float = 0.0
+
     model_config = SettingsConfigDict(
         env_file=str(PROJECT_ROOT / ".env"),
         extra="ignore",

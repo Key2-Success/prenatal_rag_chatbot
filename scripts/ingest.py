@@ -16,6 +16,7 @@ the Pinecone index from the Pinecone console first (or we can add a --reset
 flag later).
 """
 
+from backend.app.observability import flush as flush_traces
 from backend.app.rag.chunker import chunk_all_pdfs
 from backend.app.rag.embedder import embed_texts
 from backend.app.rag.retriever import upsert_chunks
@@ -28,12 +29,18 @@ def main():
     chunks = chunk_all_pdfs()
 
     print(f"\nStep 2/3: Embedding {len(chunks)} chunks...")
-    texts = [c["text"] for c in chunks]
+    # Chunk is a Pydantic model — attribute access, not dict subscript.
+    texts = [c.text for c in chunks]
     embeddings = embed_texts(texts)
     print(f"  → Got {len(embeddings)} embeddings")
 
     print("\nStep 3/3: Upserting to Pinecone...")
     upsert_chunks(chunks, embeddings)
+
+    # Drain Langfuse buffer before exit. No-op when Langfuse is disabled.
+    # Without this, the embedding generations may never reach the server
+    # because the process exits before the background flusher runs.
+    flush_traces()
 
     print("\n✓ Ingestion complete.")
 

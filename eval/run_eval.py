@@ -38,6 +38,7 @@ from pydantic import ValidationError
 from backend.app.chat.pipeline import run_chat
 from backend.app.config import PROJECT_ROOT
 from backend.app.models.schemas import ChatRequest, ResponseType
+from backend.app.observability import flush as flush_traces
 from eval.schemas import EvalSuite, TestCase
 
 EVAL_DIR = PROJECT_ROOT / "eval"
@@ -292,6 +293,11 @@ def main() -> int:
     if not args.no_report:
         path = write_markdown_report(results, note=args.note)
         print(f"\n  Report written: {path.relative_to(PROJECT_ROOT)}")
+
+    # Drain Langfuse buffer before the script exits. No-op when disabled.
+    # Without this, the eval generations may never reach Langfuse — which
+    # is exactly the case we'd most want to inspect after a failed run.
+    flush_traces()
 
     return 0 if all(r.passed for r in results) else 1
 

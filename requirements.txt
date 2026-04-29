@@ -20,3 +20,10 @@ httpx==0.28.1
 
 # Evaluation
 pyyaml==6.0.2
+
+# Observability
+# Langfuse v4 SDK (package version 4.x) — current rewrite, OTel-based.
+# Provides the @observe decorator, OpenAI drop-in wrapper for auto-tracing,
+# update_current_span / propagate_attributes for context, and get_client().flush()
+# for script termination. v2 is legacy with a different API surface — don't downgrade.
+langfuse>=4.0.0,<5.0.0

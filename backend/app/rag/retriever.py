@@ -25,6 +25,7 @@ from pinecone import Pinecone, ServerlessSpec
 from pydantic import BaseModel
 
 from backend.app.config import settings
+from backend.app.observability import observe, update_current_span
 from backend.app.rag.chunker import Chunk
 from backend.app.rag.embedder import EMBEDDING_DIMENSIONS, embed_query
 from backend.app.sources import priority_order
@@ -111,15 +112,30 @@ def _query_one_source(source_name: str, embedding: list[float]) -> list[Retrieve
     return out
 
 
+@observe(name="retrieve_ordered")
 def retrieve_ordered(query: str) -> list[RetrievedChunk]:
     """
     Query each source in priority order. Return the first source's chunks
     that pass the similarity threshold; empty list if none do (callers
     treat this as the "no_results" fallback).
     """
+    update_current_span(input={"query": query})
+
     embedding = embed_query(query)
     for source_name in priority_order():
         chunks = _query_one_source(source_name, embedding)
         if chunks:
+            # Surface which source won and how many chunks passed threshold —
+            # the most useful retrieval signals to see in the trace UI without
+            # having to expand every span.
+            update_current_span(
+                output={
+                    "winning_source": source_name,
+                    "chunks_returned": len(chunks),
+                    "top_score": chunks[0].score,
+                    "pages": [c.page_number for c in chunks],
+                },
+            )
             return chunks
+    update_current_span(output={"winning_source": None, "chunks_returned": 0})
     return []

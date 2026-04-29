@@ -29,6 +29,7 @@ from backend.app.models.schemas import (
     Source,
     UserProfile,
 )
+from backend.app.observability import observe, update_current_span
 from backend.app.rag.retriever import RetrievedChunk, retrieve_ordered
 
 SYSTEM_PROMPT = """You are Poshan Saathi, a friendly pregnancy nutrition companion for women in India.
@@ -78,8 +79,19 @@ def _build_user_message(profile: UserProfile, context: str, question: str) -> st
     )
 
 
+@observe(name="answer_llm")
 def _call_llm(profile: UserProfile, chunks: list[RetrievedChunk], question: str) -> str:
     """Send system+user messages to the LLM and return the trimmed answer."""
+    # Explicit input — only the question and a compact retrieval summary.
+    # Avoids dumping the full UserProfile object and full chunk texts into
+    # the parent span (the wrapped OpenAI call beneath captures the actual
+    # prompt sent to the model anyway).
+    update_current_span(input={
+        "question": question,
+        "retrieved_pages": [
+            f"{c.org_display_name} p.{c.page_number}" for c in chunks
+        ],
+    })
     response = get_openai_client().chat.completions.create(
         model=settings.llm_model,
         temperature=settings.llm_temperature,
@@ -92,7 +104,9 @@ def _call_llm(profile: UserProfile, chunks: list[RetrievedChunk], question: str)
             )},
         ],
     )
-    return response.choices[0].message.content.strip()
+    answer = response.choices[0].message.content.strip()
+    update_current_span(output=answer)
+    return answer
 
 
 def _to_sources(chunks: list[RetrievedChunk]) -> list[Source]:
@@ -107,28 +121,61 @@ def _to_sources(chunks: list[RetrievedChunk]) -> list[Source]:
     ]
 
 
+@observe(name="chat")
 def run_chat(request: ChatRequest) -> ChatResponse:
+    # Set EXPLICIT input on the parent span so the trace UI shows just the
+    # user's message + the relevant profile fields — not the full ChatRequest
+    # object (which would also serialise weight/height, useful but redundant).
+    # Per Langfuse skill: "Set only the relevant input (e.g., user message)".
+    profile = request.user_profile
+    update_current_span(
+        input={
+            "message": request.message,
+            "pregnancy_week": profile.pregnancy_week,
+            "diet_type": profile.diet_type.value,
+            "medical_conditions": [c.value for c in profile.medical_conditions],
+        },
+    )
+
     # 1. Triage the message. Emergency / out_of_scope short-circuit before
     #    any retrieval or answer-LLM cost.
     label = classify_message(request.message)
     short_circuit = _SHORT_CIRCUIT_BY_LABEL.get(label)
     if short_circuit is not None:
         response_type, canned = short_circuit
+        update_current_span(
+            output={"response_type": response_type.value, "answer": canned},
+        )
         return ChatResponse(response_type=response_type, answer=canned)
 
     # 2. Retrieve.
-    query = augment_query(request.message, request.user_profile)
+    query = augment_query(request.message, profile)
     chunks = retrieve_ordered(query)
 
     # 3. No relevant chunks → no_results fallback (still no answer-LLM call).
     if not chunks:
+        update_current_span(
+            output={
+                "response_type": ResponseType.no_results.value,
+                "answer": NO_RESULTS_RESPONSE,
+            },
+        )
         return ChatResponse(
             response_type=ResponseType.no_results,
             answer=NO_RESULTS_RESPONSE,
         )
 
     # 4–6. Generate and package.
-    answer = _call_llm(request.user_profile, chunks, request.message)
+    answer = _call_llm(profile, chunks, request.message)
+    update_current_span(
+        output={
+            "response_type": ResponseType.answer.value,
+            "answer": answer,
+            "sources": [
+                f"{c.org_display_name} p.{c.page_number}" for c in chunks
+            ],
+        },
+    )
     return ChatResponse(
         response_type=ResponseType.answer,
         answer=answer,

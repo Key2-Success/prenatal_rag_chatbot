@@ -37,6 +37,7 @@ from pydantic import BaseModel
 
 from backend.app.clients import get_openai_client
 from backend.app.config import settings
+from backend.app.observability import observe, update_current_span
 
 logger = logging.getLogger(__name__)
 
@@ -99,11 +100,15 @@ Tie-breaking rules:
 Return your label with one short sentence of reasoning."""
 
 
+@observe(name="classify_message")
 def classify_message(message: str) -> MessageClassification:
     """
     Classify the message. On any failure, log and return `in_scope` —
     the answer pipeline has its own scope and safety guards.
     """
+    # Set explicit input on the span instead of letting @observe capture
+    # the function args (per Langfuse skill best practice).
+    update_current_span(input={"message": message})
     try:
         completion = get_openai_client().beta.chat.completions.parse(
             model=settings.classifier_model,
@@ -126,6 +131,11 @@ def classify_message(message: str) -> MessageClassification:
         logger.debug(
             "classifier label=%s reasoning=%s message=%r",
             result.label.value, result.reasoning, message,
+        )
+        # Surface label + reasoning on the span output — visible at a glance
+        # in the trace UI without expanding the underlying generation.
+        update_current_span(
+            output={"label": result.label.value, "reasoning": result.reasoning},
         )
         return result.label
     except Exception:

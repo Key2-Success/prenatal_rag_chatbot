@@ -82,6 +82,19 @@ class Settings(BaseSettings):
     # same label, so default to deterministic.
     classifier_temperature: float = 0.0
 
+    # --- Observability (Langfuse) ---
+    # Optional. When both keys are set, the OpenAI client is auto-wrapped
+    # so every embedding / chat / parse call shows up in the Langfuse trace
+    # tree. Without keys, we fall back to the plain OpenAI client and the
+    # @observe decorators silently no-op — code paths are identical.
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: str | None = None
+    langfuse_host: str | None = None
+
+    @property
+    def langfuse_enabled(self) -> bool:
+        return bool(self.langfuse_public_key and self.langfuse_secret_key)
+
     model_config = SettingsConfigDict(
         env_file=str(PROJECT_ROOT / ".env"),
         extra="ignore",

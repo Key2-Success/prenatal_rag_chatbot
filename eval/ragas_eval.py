@@ -109,22 +109,36 @@ class AnswerCase:
     elapsed_s: float
 
 
-def run_and_capture(case: TestCase, suite: EvalSuite) -> AnswerCase | None:
+def run_and_capture(
+    case: TestCase,
+    suite: EvalSuite,
+    eval_session_id: str,
+) -> AnswerCase | None:
     """
     Run one test case. Return an AnswerCase only if the pipeline produced an
     answer (with chunks); return None for emergency / out_of_scope / no_results
     cases since RAGAS would score canned text and yield meaningless numbers.
+
+    eval_session_id groups all traces from one eval run into a single Langfuse
+    Session so you can see every case + its RAGAS scores in one view without
+    clicking into individual traces.
     """
     profile = suite.profiles[case.profile]
     request = ChatRequest(message=case.query, user_profile=profile)
     capture: dict = {}
 
-    # Name the Langfuse trace after the test case ID (e.g. "amla_pregnancy")
-    # so eval runs are findable in the trace UI without digging through
-    # generic "chat" traces. propagate_attributes is a no-op when Langfuse
-    # is disabled, so this is always safe to call.
+    # Each trace gets:
+    #   trace_name  — the test case id ("amla_pregnancy") for direct search
+    #   session_id  — the eval run timestamp ("ragas_eval_20260501_143022") so
+    #                 every case from this run is grouped in one Session view
+    #   tags        — ["ragas_eval", <category>] for cross-run filtering
+    # propagate_attributes is a no-op when Langfuse is disabled.
     t0 = time.perf_counter()
-    with propagate_attributes(trace_name=case.id):
+    with propagate_attributes(
+        trace_name=case.id,
+        session_id=eval_session_id,
+        tags=["ragas_eval", case.category.value],
+    ):
         response = run_chat(request, _eval_capture=capture)
     elapsed = time.perf_counter() - t0
 
@@ -188,10 +202,19 @@ def score_with_ragas(answer_cases: list[AnswerCase], judge_model: str):
 
 # ---------- Langfuse score attachment ----------
 
-def attach_scores_to_langfuse(answer_cases: list[AnswerCase], scores_df) -> int:
+def attach_scores_to_langfuse(
+    answer_cases: list[AnswerCase],
+    scores_df,
+    judge_model: str,
+) -> int:
     """
     Loop the per-row RAGAS scores back to the Langfuse traces that produced
     each answer. Returns the count of successfully attached scores.
+
+    Each score comment includes the case id, category, and judge model so
+    that the Langfuse Scores table is self-explanatory — you can read off
+    which case a score belongs to and what drove it without clicking into
+    the trace.
     """
     if not settings.langfuse_enabled:
         return 0
@@ -217,7 +240,12 @@ def attach_scores_to_langfuse(answer_cases: list[AnswerCase], scores_df) -> int:
                 trace_id=ac.trace_id,
                 name=metric,
                 value=value,
-                comment=f"RAGAS {metric} via gpt-4o-mini judge",
+                data_type="NUMERIC",
+                comment=(
+                    f"case={ac.case.id} "
+                    f"category={ac.case.category.value} "
+                    f"judge={judge_model}"
+                ),
             )
             attached += 1
 
@@ -359,7 +387,13 @@ def main() -> int:
         print("No cases match the given filters.")
         return 1
 
+    # All traces from this run share one session_id so they appear together in
+    # the Langfuse Sessions view. Format: "ragas_eval_<timestamp>" is both
+    # human-readable and sortable. Printed here so you can find it in the UI.
+    eval_session_id = f"ragas_eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
     print(f"Running pipeline on {len(cases)} case(s) to capture answers + chunks...")
+    print(f"Langfuse session: {eval_session_id}")
     if args.note:
         print(f"Note: {args.note}")
     print()
@@ -374,7 +408,7 @@ def main() -> int:
         print(f"[{category}]")
         for case in by_category[category]:
             try:
-                ac = run_and_capture(case, suite)
+                ac = run_and_capture(case, suite, eval_session_id)
             except Exception as e:
                 print(f"  ✗ {case.id:<28} pipeline raised: {type(e).__name__}: {e}")
                 continue
@@ -401,8 +435,9 @@ def main() -> int:
 
     # Send scores back to the Langfuse traces created during this run.
     if not args.no_langfuse_scores and settings.langfuse_enabled:
-        n = attach_scores_to_langfuse(answer_cases, df)
+        n = attach_scores_to_langfuse(answer_cases, df, judge_model=args.judge_model)
         print(f"\n  Attached {n} score(s) to Langfuse traces.")
+        print(f"  View session: https://cloud.langfuse.com/sessions/{eval_session_id}")
     elif not settings.langfuse_enabled:
         print("\n  (Langfuse not configured — skipping score attachment.)")
 

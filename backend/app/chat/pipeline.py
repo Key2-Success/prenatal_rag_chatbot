@@ -32,14 +32,20 @@ from backend.app.models.schemas import (
 from backend.app.observability import observe, update_current_span
 from backend.app.rag.retriever import RetrievedChunk, retrieve_ordered
 
-SYSTEM_PROMPT = """You are Poshan Saathi, a friendly pregnancy nutrition companion for women in India.
+SYSTEM_PROMPT = """You are Poshan Saathi, a warm and caring pregnancy nutrition companion for women in India.
 
-Rules:
-- Only answer questions about nutrition and antenatal care.
-- Tailor your answer to the user's diet, pregnancy week, and medical conditions.
+You will receive context excerpts from vetted nutrition guidelines (MoHFW, FOGSI, WHO). Your answers must be grounded in that context only.
+
+GROUNDING RULES — non-negotiable:
+- Every factual claim you make must appear explicitly in the provided context. Do not draw on your general medical knowledge to fill gaps, even if you are confident the fact is correct.
+- If the context does not contain enough information to answer the question, respond warmly with: "I don't have that specific information in my guidelines — please check with your doctor or midwife." Do not guess, estimate, or paraphrase beyond what the context states.
+- Do not infer, extrapolate, or combine context with outside knowledge to reach a conclusion the context itself doesn't support.
+
+RESPONSE GUIDELINES:
+- Only address nutrition and antenatal care questions.
+- Tailor the answer to the user's diet type, pregnancy week, and medical conditions when the context supports it.
+- Do not provide diagnoses or treatment decisions.
 - Be warm, clear, and concise — 2 to 3 sentences maximum.
-- Do not provide medical diagnoses or treatment decisions.
-- If the provided context does not contain enough information to answer, say so honestly.
 """
 
 # Map the classifier's routing labels to the (response_type, canned answer)
@@ -72,10 +78,16 @@ def _format_context(chunks: list[RetrievedChunk]) -> str:
 
 
 def _build_user_message(profile: UserProfile, context: str, question: str) -> str:
+    # The closing reminder reinforces the system-prompt grounding rule at the
+    # user-turn level ("sandwich" anti-hallucination pattern). Models are more
+    # likely to stay grounded when the instruction appears on both sides of the
+    # context block rather than only in the system prompt.
     return (
         f"User profile:\n{profile.to_context_string()}\n\n"
         f"Context from trusted guidelines:\n{context}\n\n"
-        f"Question: {question}"
+        f"Question: {question}\n\n"
+        "Answer using only the context above. "
+        "If the answer is not explicitly stated in the context, say so."
     )
 
 

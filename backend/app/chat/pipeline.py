@@ -122,7 +122,19 @@ def _to_sources(chunks: list[RetrievedChunk]) -> list[Source]:
 
 
 @observe(name="chat")
-def run_chat(request: ChatRequest) -> ChatResponse:
+def run_chat(
+    request: ChatRequest,
+    _eval_capture: dict | None = None,
+) -> ChatResponse:
+    """
+    Production entry point.
+
+    The optional `_eval_capture` dict is an eval-suite back-channel: when
+    present, run_chat populates it with the retrieved chunks and the active
+    Langfuse trace_id so downstream scoring (e.g. RAGAS) can attach scores
+    to the same trace without duplicating retrieval. Production callers
+    should never pass it — the underscore prefix marks it as private.
+    """
     # Set EXPLICIT input on the parent span so the trace UI shows just the
     # user's message + the relevant profile fields — not the full ChatRequest
     # object (which would also serialise weight/height, useful but redundant).
@@ -176,6 +188,19 @@ def run_chat(request: ChatRequest) -> ChatResponse:
             ],
         },
     )
+    # Eval-only side channel — only populated when the caller opts in.
+    # Captures both the retrieved chunks (for RAGAS dataset construction)
+    # and the active Langfuse trace_id (for langfuse.create_score) so the
+    # downstream scoring step doesn't have to re-run retrieval or query
+    # Langfuse to find the trace.
+    if _eval_capture is not None:
+        _eval_capture["chunks"] = chunks
+        if settings.langfuse_enabled:
+            from langfuse import get_client
+            _eval_capture["trace_id"] = get_client().get_current_trace_id()
+        else:
+            _eval_capture["trace_id"] = None
+
     return ChatResponse(
         response_type=ResponseType.answer,
         answer=answer,

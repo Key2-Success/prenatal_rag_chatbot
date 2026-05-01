@@ -34,8 +34,12 @@ out/
 # Logs
 *.log
 
-# Claude Code session/local settings
-.claude/
+# Claude Code session/local settings — ignore everything EXCEPT skills,
+# which are first-class deliverables (curated agentic skills like ragas/
+# and langfuse/ that document our integration patterns).
+.claude/*
+!.claude/skills/
+.claude/skills/*-workspace/
 
 # Eval run artifacts (generated locally; don't churn the repo)
 eval/results/

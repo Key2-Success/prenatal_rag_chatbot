@@ -35,6 +35,7 @@ calls per run. Budget accordingly. See .claude/skills/ragas/references/pitfalls.
 """
 
 import argparse
+import os
 import sys
 import time
 from collections import defaultdict
@@ -43,22 +44,34 @@ from datetime import datetime
 from pathlib import Path
 
 import yaml
-from langchain_openai import ChatOpenAI
 from pydantic import ValidationError
-from ragas import EvaluationDataset, evaluate
-from ragas.llms import LangchainLLMWrapper
-from ragas.metrics import (
-    Faithfulness,
-    LLMContextPrecisionWithoutReference,
-    ResponseRelevancy,
-)
 
 from backend.app.chat.pipeline import run_chat
 from backend.app.config import PROJECT_ROOT, settings
 from backend.app.models.schemas import ChatRequest, ResponseType
-from backend.app.observability import flush as flush_traces
+from backend.app.observability import flush as flush_traces, propagate_attributes
 from eval.run_eval import EVAL_DIR, PROFILES_PATH, CASES_PATH, RESULTS_DIR
 from eval.schemas import EvalSuite, TestCase
+
+# RAGAS and LangChain read OPENAI_API_KEY from os.environ, not from our
+# pydantic-settings object. Mirror the key across BEFORE importing ragas /
+# langchain — those modules cache the env at import time. If the key is
+# missing entirely, the import-time check below produces a clearer error
+# than the deep stack trace from a downstream OpenAI client.
+if not settings.openai_api_key:
+    raise RuntimeError(
+        "OPENAI_API_KEY is not set in .env — required for the RAGAS judge and embeddings."
+    )
+os.environ.setdefault("OPENAI_API_KEY", settings.openai_api_key)
+
+from langchain_openai import ChatOpenAI  # noqa: E402
+from ragas import EvaluationDataset, evaluate  # noqa: E402
+from ragas.llms import LangchainLLMWrapper  # noqa: E402
+from ragas.metrics import (  # noqa: E402
+    Faithfulness,
+    LLMContextPrecisionWithoutReference,
+    ResponseRelevancy,
+)
 
 # Default judge: stronger than the answer LLM (gpt-4.1-nano) to avoid same-model
 # bias. Override with --judge-model. Always temperature=0 for reproducibility.
@@ -106,8 +119,13 @@ def run_and_capture(case: TestCase, suite: EvalSuite) -> AnswerCase | None:
     request = ChatRequest(message=case.query, user_profile=profile)
     capture: dict = {}
 
+    # Name the Langfuse trace after the test case ID (e.g. "amla_pregnancy")
+    # so eval runs are findable in the trace UI without digging through
+    # generic "chat" traces. propagate_attributes is a no-op when Langfuse
+    # is disabled, so this is always safe to call.
     t0 = time.perf_counter()
-    response = run_chat(request, _eval_capture=capture)
+    with propagate_attributes(trace_name=case.id):
+        response = run_chat(request, _eval_capture=capture)
     elapsed = time.perf_counter() - t0
 
     # Filter: only score real answers. Canned guardrail text would inflate
@@ -146,7 +164,17 @@ def build_ragas_dataset(answer_cases: list[AnswerCase]) -> EvaluationDataset:
 def score_with_ragas(answer_cases: list[AnswerCase], judge_model: str):
     """Run the three reference-free RAGAS metrics. Returns the result object."""
     dataset = build_ragas_dataset(answer_cases)
-    judge = LangchainLLMWrapper(ChatOpenAI(model=judge_model, temperature=0))
+    # Explicit api_key — LangChain's ChatOpenAI reads from os.environ
+    # OPENAI_API_KEY by default, but pydantic-settings loaded our key into
+    # `settings.openai_api_key`, not into the environment. Passing it through
+    # avoids the user having to also export OPENAI_API_KEY just for eval.
+    judge = LangchainLLMWrapper(
+        ChatOpenAI(
+            model=judge_model,
+            temperature=0,
+            api_key=settings.openai_api_key,
+        )
+    )
     return evaluate(
         dataset=dataset,
         metrics=[
@@ -199,21 +227,28 @@ def attach_scores_to_langfuse(answer_cases: list[AnswerCase], scores_df) -> int:
 
 # ---------- Console + markdown reporting ----------
 
-def _print_aggregate(result, n_cases: int) -> None:
+def _print_aggregate(scores_df, n_cases: int) -> None:
+    """Print mean scores per metric, computed from the per-row dataframe.
+
+    We compute aggregates from `to_pandas()` rather than accessing the
+    EvaluationResult object directly because RAGAS's EvaluationResult does
+    not support `in` for metric-name membership tests — `metric in result`
+    falls through to `__getitem__(int)` and raises KeyError(0).
+    """
     print()
     print("=" * 72)
     print("  RAGAS AGGREGATE SCORES")
     print("=" * 72)
     print(f"  Cases scored: {n_cases}")
     for metric in METRIC_COLUMNS:
-        if metric in result:
-            print(f"  {metric:<45} {result[metric]:.3f}")
+        if metric in scores_df.columns:
+            mean = scores_df[metric].mean()
+            print(f"  {metric:<45} {mean:.3f}")
 
 
 def _markdown_report(
     answer_cases: list[AnswerCase],
     scores_df,
-    aggregate,
     judge_model: str,
     note: str | None,
     timestamp: str,
@@ -231,10 +266,11 @@ def _markdown_report(
     if note:
         lines += ["## Note", "", f"> {note}", ""]
 
+    # Compute aggregate from the DataFrame for the same reason as _print_aggregate.
     lines += ["## Aggregate scores", "", "| Metric | Score |", "|---|---|"]
     for metric in METRIC_COLUMNS:
-        if metric in aggregate:
-            lines.append(f"| {metric} | {aggregate[metric]:.3f} |")
+        if metric in scores_df.columns:
+            lines.append(f"| {metric} | {scores_df[metric].mean():.3f} |")
     lines.append("")
 
     lines += [
@@ -361,7 +397,7 @@ def main() -> int:
 
     result = score_with_ragas(answer_cases, judge_model=args.judge_model)
     df = result.to_pandas()
-    _print_aggregate(result, n_cases=len(answer_cases))
+    _print_aggregate(df, n_cases=len(answer_cases))
 
     # Send scores back to the Langfuse traces created during this run.
     if not args.no_langfuse_scores and settings.langfuse_enabled:
@@ -374,7 +410,6 @@ def main() -> int:
         path = write_markdown_report(
             answer_cases=answer_cases,
             scores_df=df,
-            aggregate=result,
             judge_model=args.judge_model,
             note=args.note,
             skipped=skipped,

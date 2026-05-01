@@ -31,8 +31,9 @@ langfuse>=4.0.0,<5.0.0
 # RAG answer-quality evaluation (LLM-as-judge)
 # Pinned to the v0.2 line — v0.1 used different metric names (AnswerRelevancy,
 # ContextPrecision) and v0.3+ may rename again. langchain-openai is RAGAS's
-# default LLM wrapper path; pinned to the langchain-core 0.2 series for
-# compatibility per RAGAS install docs.
+# default LLM wrapper path; we let pip resolve langchain-core/langchain-openai
+# rather than pinning, because the project also uses langchain-text-splitters
+# (chunker) which requires langchain-core>=0.3.25 and any explicit pin here
+# would conflict.
 ragas>=0.2.0,<0.3.0
-langchain-openai>=0.1.0,<0.2.0
-langchain-core>=0.2.0,<0.3.0
+langchain-openai

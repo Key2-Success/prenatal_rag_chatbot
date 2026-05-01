@@ -30,7 +30,7 @@ from backend.app.models.schemas import (
     UserProfile,
 )
 from backend.app.observability import observe, update_current_span
-from backend.app.rag.retriever import RetrievedChunk, retrieve_ordered
+from backend.app.rag.retriever import RetrievedChunk, retrieve_and_rerank
 
 SYSTEM_PROMPT = """You are Poshan Saathi, a warm and caring pregnancy nutrition companion for women in India.
 
@@ -172,9 +172,9 @@ def run_chat(
         )
         return ChatResponse(response_type=response_type, answer=canned)
 
-    # 2. Retrieve.
+    # 2. Retrieve: recall from all sources, rerank, order by source priority.
     query = augment_query(request.message, profile)
-    chunks = retrieve_ordered(query)
+    chunks = retrieve_and_rerank(query)
 
     # 3. No relevant chunks → no_results fallback (still no answer-LLM call).
     if not chunks:

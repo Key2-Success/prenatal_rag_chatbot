@@ -63,10 +63,21 @@ class Settings(BaseSettings):
     # --- Retrieval knobs ---
     # Pinecone cosine scores typically land in [0.0, 1.0] for related text.
     # Lower → more recall, more noise. Higher → more precision, more fallbacks.
+    # Applies during the recall phase (before reranking) as a noise floor —
+    # chunks that don't clear this threshold are excluded from the reranker input.
     # Override per-run via env, e.g. `SIMILARITY_THRESHOLD=0.55 python -m eval.run_eval`.
     similarity_threshold: float = 0.3
-    # Candidates fetched per source before threshold filtering.
+    # Final number of chunks returned to the LLM context window.
     top_k: int = 5
+    # Candidates fetched per source during the recall phase (Stage 1).
+    # All sources are queried and pooled before the reranker sees them.
+    # More → better recall input for the reranker; fewer → cheaper + faster.
+    # Start conservative at 5 per source (15 pool max → reranked to top_k=5).
+    reranker_candidate_k: int = 5
+    # Pinecone Inference model used for cross-encoder reranking (Stage 2).
+    # bge-reranker-v2-m3 is a strong multilingual cross-encoder; no extra API
+    # key required — uses the existing PINECONE_API_KEY.
+    reranker_model: str = "bge-reranker-v2-m3"
 
     # --- LLM knobs ---
     llm_model: str = "gpt-4.1-nano"

@@ -75,3 +75,17 @@ def priority_order() -> tuple[str, ...]:
     Tuple (not list) so callers can't mutate the cached order.
     """
     return tuple(s.org_display_name for s in load_sources())
+
+
+@lru_cache(maxsize=1)
+def priority_rank_by_org() -> dict[str, int]:
+    """
+    Map org_display_name → doc_reference_order (lower = higher priority).
+
+    Used by the retriever to sort selected chunks so the LLM sees
+    higher-priority source content first in the context window, without
+    any additive score nudges.
+
+    Example: {"MoHFW": 1, "FOGSI": 2, "WHO": 3}
+    """
+    return {s.org_display_name: s.doc_reference_order for s in load_sources()}

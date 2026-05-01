@@ -50,6 +50,8 @@ from backend.app.chat.pipeline import run_chat
 from backend.app.config import PROJECT_ROOT, settings
 from backend.app.models.schemas import ChatRequest, ResponseType
 from backend.app.observability import flush as flush_traces, propagate_attributes
+from backend.app.rag.retriever import RetrievedChunk
+from backend.app.sources import priority_order
 from eval.run_eval import EVAL_DIR, PROFILES_PATH, CASES_PATH, RESULTS_DIR
 from eval.schemas import EvalSuite, TestCase
 
@@ -104,7 +106,11 @@ class AnswerCase:
     case: TestCase
     user_input: str
     response: str
+    # retrieved_contexts is the list[str] RAGAS expects (text only).
+    # chunks carries the full metadata (source, score) for reporting.
+    # Both are derived from the same pipeline capture — keep them in sync.
     retrieved_contexts: list[str]
+    chunks: list[RetrievedChunk]
     trace_id: str | None
     elapsed_s: float
 
@@ -156,6 +162,7 @@ def run_and_capture(
         user_input=case.query,
         response=response.answer,
         retrieved_contexts=[c.text for c in chunks],
+        chunks=chunks,
         trace_id=capture.get("trace_id"),
         elapsed_s=elapsed,
     )
@@ -255,13 +262,82 @@ def attach_scores_to_langfuse(
 
 # ---------- Console + markdown reporting ----------
 
-def _print_aggregate(scores_df, n_cases: int) -> None:
-    """Print mean scores per metric, computed from the per-row dataframe.
+def _format_source_breakdown(chunks: list[RetrievedChunk]) -> str:
+    """
+    Compact per-case source/score string for the markdown report table.
 
-    We compute aggregates from `to_pandas()` rather than accessing the
-    EvaluationResult object directly because RAGAS's EvaluationResult does
-    not support `in` for metric-name membership tests — `metric in result`
-    falls through to `__getitem__(int)` and raises KeyError(0).
+    Sources appear in project priority order (MoHFW → FOGSI → WHO).
+    Within each source, scores are shown highest-first.
+
+    Example: "MoHFW×2(0.91,0.88) FOGSI×1(0.74) WHO×1(0.71)"
+    Returns "—" for an empty chunk list.
+    """
+    if not chunks:
+        return "—"
+
+    by_source: dict[str, list[float]] = defaultdict(list)
+    for c in chunks:
+        by_source[c.org_display_name].append(c.score)
+
+    parts = []
+    # Iterate in canonical priority order so the string is stable across runs.
+    for source in priority_order():
+        if source not in by_source:
+            continue
+        scores = sorted(by_source[source], reverse=True)
+        parts.append(f"{source}×{len(scores)}({','.join(f'{s:.2f}' for s in scores)})")
+
+    return " ".join(parts)
+
+
+def _source_diversity_stats(answer_cases: list[AnswerCase]) -> dict:
+    """
+    Aggregate source diversity metrics across all scored cases.
+
+    Returns a dict with:
+      avg_unique_sources  — mean number of distinct sources per case
+      source_presence     — {source: (count, pct)} cases containing ≥1 chunk
+      source_avg_score    — {source: mean reranker score} across all chunks
+      all_sources_cases   — count of cases where every known source contributed
+    """
+    n = len(answer_cases)
+    sources = priority_order()
+
+    presence: dict[str, int] = defaultdict(int)
+    all_scores: dict[str, list[float]] = defaultdict(list)
+    unique_counts: list[int] = []
+    all_sources_cases = 0
+
+    for ac in answer_cases:
+        present = {c.org_display_name for c in ac.chunks}
+        unique_counts.append(len(present))
+        for src in present:
+            presence[src] += 1
+        for c in ac.chunks:
+            all_scores[c.org_display_name].append(c.score)
+        if present >= set(sources):
+            all_sources_cases += 1
+
+    return {
+        "n": n,
+        "avg_unique_sources": sum(unique_counts) / n if n else 0.0,
+        "all_sources_cases": all_sources_cases,
+        "source_presence": {
+            s: (presence[s], presence[s] / n * 100) for s in sources
+        },
+        "source_avg_score": {
+            s: (sum(all_scores[s]) / len(all_scores[s])) if all_scores[s] else None
+            for s in sources
+        },
+    }
+
+
+def _print_aggregate(scores_df, n_cases: int, answer_cases: list[AnswerCase]) -> None:
+    """Print mean RAGAS scores and source diversity summary to stdout.
+
+    Aggregates are computed from `to_pandas()` rather than EvaluationResult
+    directly — RAGAS's EvaluationResult.__getitem__ expects int, not string,
+    so `metric in result` raises KeyError(0).
     """
     print()
     print("=" * 72)
@@ -272,6 +348,16 @@ def _print_aggregate(scores_df, n_cases: int) -> None:
         if metric in scores_df.columns:
             mean = scores_df[metric].mean()
             print(f"  {metric:<45} {mean:.3f}")
+
+    stats = _source_diversity_stats(answer_cases)
+    print()
+    print(f"  Avg unique sources per case: {stats['avg_unique_sources']:.1f}")
+    print(f"  Cases with all sources:      {stats['all_sources_cases']}/{n_cases}")
+    for src in priority_order():
+        count, pct = stats["source_presence"].get(src, (0, 0.0))
+        avg = stats["source_avg_score"].get(src)
+        avg_str = f"avg score {avg:.3f}" if avg is not None else "no chunks"
+        print(f"  {src:<10} present in {count:>2}/{n_cases} cases ({pct:4.0f}%)  {avg_str}")
 
 
 def _markdown_report(
@@ -304,16 +390,39 @@ def _markdown_report(
     lines += [
         "## Per-case scores",
         "",
-        "| ID | Category | Faithfulness | Answer relevancy | Context precision |",
-        "|---|---|---|---|---|",
+        "| ID | Category | Faithfulness | Answer relevancy | Context precision | Retrieved |",
+        "|---|---|---|---|---|---|",
     ]
     for ac, (_, row) in zip(answer_cases, scores_df.iterrows()):
         lines.append(
             f"| {ac.case.id} | {ac.case.category.value} "
             f"| {row.get('faithfulness', float('nan')):.3f} "
             f"| {row.get('answer_relevancy', float('nan')):.3f} "
-            f"| {row.get('llm_context_precision_without_reference', float('nan')):.3f} |"
+            f"| {row.get('llm_context_precision_without_reference', float('nan')):.3f} "
+            f"| {_format_source_breakdown(ac.chunks)} |"
         )
+    lines.append("")
+
+    # Source diversity aggregate — the primary lens for evaluating whether
+    # retrieval is monopolised by one source and whether top_k is right.
+    stats = _source_diversity_stats(answer_cases)
+    n = stats["n"]
+    lines += [
+        "## Source diversity",
+        "",
+        f"**Avg unique sources per case:** {stats['avg_unique_sources']:.1f}  ",
+        f"**Cases with all {len(priority_order())} sources:** "
+        f"{stats['all_sources_cases']}/{n} "
+        f"({stats['all_sources_cases']/n*100:.0f}%)",
+        "",
+        "| Source | Cases present | % of cases | Avg reranker score |",
+        "|---|---|---|---|",
+    ]
+    for src in priority_order():
+        count, pct = stats["source_presence"].get(src, (0, 0.0))
+        avg = stats["source_avg_score"].get(src)
+        avg_str = f"{avg:.3f}" if avg is not None else "—"
+        lines.append(f"| {src} | {count}/{n} | {pct:.0f}% | {avg_str} |")
     lines.append("")
 
     if skipped:
@@ -431,7 +540,7 @@ def main() -> int:
 
     result = score_with_ragas(answer_cases, judge_model=args.judge_model)
     df = result.to_pandas()
-    _print_aggregate(df, n_cases=len(answer_cases))
+    _print_aggregate(df, n_cases=len(answer_cases), answer_cases=answer_cases)
 
     # Send scores back to the Langfuse traces created during this run.
     if not args.no_langfuse_scores and settings.langfuse_enabled:

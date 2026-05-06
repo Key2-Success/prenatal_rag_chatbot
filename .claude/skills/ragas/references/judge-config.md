@@ -2,22 +2,25 @@
 
 The judge LLM is the model RAGAS uses to *evaluate* answers. Its choice affects scoring quality more than any other RAGAS knob.
 
-## Why a stronger judge than the answer LLM
+## Two rules for judge selection
 
-The single most important rule: **the judge must be at least as strong as, ideally stronger than, the model that produced the answer.** Reasons:
+1. **Cross-vendor by default.** Pick a judge from a *different vendor* than the answer LLM. A model judging output from its own family tends to score generously (self-favouring bias) AND shares failure modes — it can't reliably catch errors it would have made itself. See `pitfalls.md` #2.
+2. **At least as strong, ideally stronger** than the answer LLM. A weaker judge can't catch subtle hallucinations a stronger answer model produces. With `temperature=0`, stronger models are also more consistent across runs.
 
-1. **Self-favouring bias.** A model judging its own output tends to score it generously. Using a different model breaks the loop.
-2. **Detection ceiling.** A weaker judge cannot reliably catch errors a stronger model would. If your answer LLM produces subtle hallucinations, a peer-strength judge will miss them.
-3. **Determinism.** Stronger models (with `temperature=0`) are more consistent across runs. Eval scores need to be reproducible to be useful.
+**Always pin to a dated snapshot, not a floating alias.** Floating aliases (e.g. `claude-sonnet-4-5`, `gpt-4o`) silently shift versions and move scores by 0.05+. Use the dated form (`claude-sonnet-4-5-20250929`, `gpt-4o-2024-08-06`) so longitudinal comparisons stay meaningful.
 
 Practical pairings:
 
-| Answer LLM        | Recommended judge |
-| ----------------- | ----------------- |
-| `gpt-4o`          | `gpt-4o` or stronger (Claude Sonnet, etc.) |
-| `gpt-4o-mini`     | `gpt-4o`          |
-| `gpt-4.1-nano`    | `gpt-4o-mini` or `gpt-4.1-mini` |
-| open-source 7-13B | `gpt-4o-mini` minimum |
+| Answer LLM (vendor)       | Recommended judge (vendor)                              |
+| ------------------------- | ------------------------------------------------------- |
+| `gpt-4.1-nano` (OpenAI)   | `claude-sonnet-4-5-20250929` (Anthropic)                |
+| `gpt-4o-mini` (OpenAI)    | `claude-sonnet-4-5-20250929` (Anthropic)                |
+| `gpt-4o` (OpenAI)         | `claude-opus-...` (Anthropic) or `claude-sonnet-4-5-...`|
+| `claude-sonnet-...` (Anthropic) | `gpt-4o-2024-08-06` or stronger (OpenAI)          |
+| `claude-haiku-...` (Anthropic)  | `gpt-4o-mini` or stronger (OpenAI)                |
+| open-source 7-13B         | `gpt-4o-mini` (OpenAI) or `claude-haiku-...` (Anthropic) — minimum |
+
+If you can't use a cross-vendor judge (e.g. only one provider's API is available), document the reason in code and pick a meaningfully stronger model from the same vendor (e.g. `gpt-4o` judging `gpt-4o-mini`). Never judge with the same or weaker tier than the answer LLM.
 
 **Always set `temperature=0` on the judge.** Eval scores must be reproducible across runs.
 

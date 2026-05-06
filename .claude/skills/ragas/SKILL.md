@@ -7,14 +7,27 @@ description: Use this skill whenever the user wants to evaluate, score, benchmar
 
 This skill teaches an AI assistant how to evaluate RAG pipelines with [RAGAS](https://docs.ragas.io) — the open-source LLM-as-judge framework by ExplodingGradients. RAGAS scores the *content quality* of generated answers (faithfulness, relevance, retrieval precision), which is orthogonal to behavioural/routing tests that check whether the right pipeline path fired.
 
+## Precondition: read this skill in full BEFORE writing any RAGAS code
+
+This is non-negotiable. RAGAS has multiple footguns (renamed metrics, judge-bias traps, dataset-shape requirements, cost-runaway patterns) that have specific, opinionated answers documented inside this skill. Going from memory or training data will reproduce mistakes the skill exists to prevent.
+
+Before the first line of code:
+
+1. Read this `SKILL.md` end to end.
+2. Read **every** file under `references/` that's relevant to the task — at minimum `metrics.md`, `judge-config.md`, and `pitfalls.md` for any new RAGAS integration. Skim the others.
+3. Surface the relevant best practices from those files **back to the user in your plan** (in your own words, citing the reference filename). This proves you read them, and gives the user a chance to flag any project-specific deviation before you write code.
+4. Only after the user confirms the plan, start writing code.
+
+If you find yourself typing `from ragas...` without having done the above, stop and re-enter at step 1. "I think I remember" is not a substitute for reading the file.
+
 ## Core Principles
 
 Follow these for ALL RAGAS work:
 
-1. **Documentation first**: NEVER write RAGAS code from memory. The library has renamed metrics (e.g. `AnswerRelevancy` → `ResponseRelevancy`) and refactored namespaces. Always check the [current docs](https://docs.ragas.io/) before writing imports.
+1. **Documentation first**: NEVER write RAGAS code from memory. The library has renamed metrics (e.g. `AnswerRelevancy` → `ResponseRelevancy`) and refactored namespaces. Read this skill's references first (see Precondition above), then check the [current upstream docs](https://docs.ragas.io/) for anything not covered here.
 2. **Pick metrics based on what data you have**, not what sounds impressive. If there are no reference (ground-truth) answers, use the reference-free subset. See `references/metrics.md`.
-3. **Use a stronger judge than the answer LLM.** Judging with the same model that generated the answer creates self-favouring bias. A small but stronger judge (`gpt-4o-mini` for nano-tier answers, `gpt-4o` for mini-tier answers) keeps scoring honest. See `references/judge-config.md`.
-4. **Control cost up front.** RAGAS makes 3-10 LLM calls per (sample × metric). On a 100-case eval with 4 metrics, that's 1200–4000 calls. Sample down or pin a budget before running on a large dataset. See `references/pitfalls.md`.
+3. **Cross-vendor judge by default.** Same-vendor judging (e.g. GPT judging GPT) inflates scores via self-favouring bias and shares failure modes — the judge can't catch the kinds of errors it would have made itself. For OpenAI answer LLMs, default to a Claude judge (e.g. `claude-sonnet-4-5-20250929` via `langchain_anthropic.ChatAnthropic`); for Anthropic answer LLMs, default to GPT. The judge must also be at least as strong as the answer model. Pin to a dated snapshot, not a floating alias — eval scores need version stability. See `references/judge-config.md` and `references/pitfalls.md` #2.
+4. **Control cost AND rate limits up front.** RAGAS makes 3-10 LLM calls per (sample × metric), and parallelises them aggressively by default. On a 100-case eval with 4 metrics, that's 1200–4000 calls — and the default fan-out can blow through Tier-1 token limits (30k TPM) in seconds. Always pass `RunConfig(max_workers=4)` (conservative end of 4-8) and sample down for iteration. See `references/pitfalls.md` and `references/judge-config.md` "Concurrency / batch size".
 5. **Layer with behavioural eval, don't replace it.** RAGAS evaluates *answer content*. It does NOT replace tests that check routing, classification, or pipeline structure. Run both.
 
 ## Use-case-specific references

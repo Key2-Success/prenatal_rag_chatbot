@@ -6,6 +6,9 @@ uvicorn[standard]==0.32.1
 openai==1.58.1
 pinecone==5.4.2
 langchain-text-splitters==0.3.3
+# SemanticChunker lives here. Pinned to the 0.3.x line — the 0.4.x series
+# jumps to langchain-core>=1.0.0 which conflicts with the rest of the chain.
+langchain-experimental==0.3.4
 pypdf==5.1.0
 
 # Data & Config
@@ -36,4 +39,8 @@ langfuse>=4.0.0,<5.0.0
 # (chunker) which requires langchain-core>=0.3.25 and any explicit pin here
 # would conflict.
 ragas>=0.2.0,<0.3.0
-langchain-openai
+# Pin both langchain wrappers to the 0.3.x line so they stay compatible with
+# langchain-text-splitters==0.3.3 and langchain-experimental==0.3.4. The 0.4.x /
+# 1.x lines jump to langchain-core>=1.0 and break those pins.
+langchain-openai<0.4
+langchain-anthropic<0.4

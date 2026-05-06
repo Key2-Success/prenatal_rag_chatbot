@@ -56,6 +56,12 @@ class Settings(BaseSettings):
     openai_api_key: str
     pinecone_api_key: str
 
+    # --- Optional secrets ---
+    # Used only by the RAGAS judge, which is cross-vendor (Claude judging GPT)
+    # to avoid same-family bias. Optional so the rest of the app runs without
+    # an Anthropic key — eval/ragas_eval.py validates this at score time.
+    anthropic_api_key: str | None = None
+
     # --- App ---
     pinecone_index_name: str = "poshan-saathi"
     app_env: str = "development"
@@ -68,7 +74,7 @@ class Settings(BaseSettings):
     # Override per-run via env, e.g. `SIMILARITY_THRESHOLD=0.55 python -m eval.run_eval`.
     similarity_threshold: float = 0.3
     # Final number of chunks returned to the LLM context window.
-    top_k: int = 5
+    top_k: int = 3
     # Candidates fetched per source during the recall phase (Stage 1).
     # All sources are queried and pooled before the reranker sees them.
     # More → better recall input for the reranker; fewer → cheaper + faster.
@@ -83,6 +89,17 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-4.1-nano"
     # Lower temperature = more consistent, factual answers (good for medical).
     llm_temperature: float = 0.3
+
+    # --- Chunking knobs ---
+    # SemanticChunker (langchain_experimental) groups consecutive sentences into
+    # a chunk, cutting only where the embedding distance between neighbouring
+    # sentence groups exceeds the threshold.
+    # "percentile" cuts at the Nth percentile of observed distances — higher N
+    # means fewer cuts (longer, more coherent chunks). 95 = cut only at the
+    # top 5% largest topic shifts; reasonable starting point for structured
+    # clinical guidelines. Override per-run: SEMANTIC_BREAKPOINT_THRESHOLD_AMOUNT=90
+    semantic_breakpoint_threshold_type: str = "percentile"
+    semantic_breakpoint_threshold_amount: float = 95.0
 
     # --- Classifier knobs ---
     # Triage LLM that labels each incoming message as in_scope / emergency /

@@ -171,7 +171,7 @@ class AnswerCase:
 def run_and_capture(
     case: TestCase,
     suite: EvalSuite,
-    eval_session_id: str,
+    run_id: str,
 ) -> tuple[RoutingResult, AnswerCase | None]:
     """
     Run one test case end-to-end.
@@ -181,7 +181,7 @@ def run_and_capture(
     returns None in that slot for emergency / out_of_scope / no_results because
     RAGAS metrics are meaningless on canned text.
 
-    eval_session_id groups all traces from one eval run into a single Langfuse
+    run_id groups all traces from one eval run into a single Langfuse
     Session so you can see every case + its RAGAS scores in one view.
     """
     profile = suite.profiles[case.profile]
@@ -192,7 +192,7 @@ def run_and_capture(
     try:
         with propagate_attributes(
             trace_name=case.id,
-            session_id=eval_session_id,
+            session_id=run_id,
             tags=["ragas_eval", case.category.value],
         ):
             response = run_chat(request, _eval_capture=capture)
@@ -662,13 +662,19 @@ def _markdown_report(
     return "\n".join(lines)
 
 
-def write_markdown_report(*args, **kwargs) -> Path:
+def write_markdown_report(*args, run_id: str, **kwargs) -> Path:
+    """Write the eval report to eval/results/<run_id>.md.
+
+    `run_id` must be the same identifier used for the Langfuse session so that
+    the filename and the Langfuse session URL share a single key — no more
+    timestamp skew between what's on disk and what's in the trace dashboard.
+    Format: "eval_YYYYMMDD_HHMMSS" (computed once in main(), passed here).
+    """
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    # Filename describes the artifact (an eval report), not the tool used to
-    # produce it (RAGAS is one of several scoring layers). Keeps names stable
-    # if the toolchain changes.
-    path = RESULTS_DIR / f"eval_{timestamp}.md"
+    path = RESULTS_DIR / f"{run_id}.md"
+    # Strip the "eval_" prefix so the markdown title reads "Eval 20260508_123456"
+    # rather than "Eval eval_20260508_123456".
+    timestamp = run_id.removeprefix("eval_")
     content = _markdown_report(*args, timestamp=timestamp, **kwargs)
     path.write_text(content)
     return path
@@ -721,10 +727,14 @@ def main() -> int:
         print("No cases match the given filters.")
         return 1
 
-    eval_session_id = f"ragas_eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    # Single identifier for both the Langfuse session and the markdown filename.
+    # Computing it once here eliminates the timestamp skew that used to produce
+    # different IDs in the trace dashboard vs. the saved report.
+    # Format: "eval_YYYYMMDD_HHMMSS" — describes the artifact, not the tool.
+    run_id = f"eval_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
     print(f"Running pipeline on {len(cases)} case(s)...")
-    print(f"Langfuse session: {eval_session_id}")
+    print(f"Run ID (Langfuse session + report filename): {run_id}")
     if args.note:
         print(f"Note: {args.note}")
     print()
@@ -739,7 +749,7 @@ def main() -> int:
     for category in sorted(by_category):
         print(f"[{category}]")
         for case in by_category[category]:
-            routing, answer_case = run_and_capture(case, suite, eval_session_id)
+            routing, answer_case = run_and_capture(case, suite, run_id)
             routing_results.append(routing)
 
             label = "PASS" if routing.passed else "FAIL"
@@ -764,6 +774,7 @@ def main() -> int:
                 scores_df=None,
                 judge_model=args.judge_model,
                 note=args.note,
+                run_id=run_id,
             )
             print(f"\n  Report written: {path.relative_to(PROJECT_ROOT)}")
         flush_traces()
@@ -780,7 +791,7 @@ def main() -> int:
     if not args.no_langfuse_scores and settings.langfuse_enabled:
         n = attach_scores_to_langfuse(answer_cases, df, judge_model=args.judge_model)
         print(f"\n  Attached {n} score(s) to Langfuse traces.")
-        print(f"  View session: https://cloud.langfuse.com/sessions/{eval_session_id}")
+        print(f"  View session: https://cloud.langfuse.com/sessions/{run_id}")
     elif not settings.langfuse_enabled:
         print("\n  (Langfuse not configured — skipping score attachment.)")
 
@@ -791,6 +802,7 @@ def main() -> int:
             scores_df=df,
             judge_model=args.judge_model,
             note=args.note,
+            run_id=run_id,
         )
         print(f"\n  Report written: {path.relative_to(PROJECT_ROOT)}")
 

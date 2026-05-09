@@ -172,6 +172,8 @@ def run_and_capture(
     case: TestCase,
     suite: EvalSuite,
     run_id: str,
+    run_idx: int = 0,
+    total_runs: int = 1,
 ) -> tuple[RoutingResult, AnswerCase | None]:
     """
     Run one test case end-to-end.
@@ -183,17 +185,24 @@ def run_and_capture(
 
     run_id groups all traces from one eval run into a single Langfuse
     Session so you can see every case + its RAGAS scores in one view.
+
+    For multi-run evals (total_runs > 1), each trace is tagged
+    "run_<i>_of_<n>" so you can filter the session view by run iteration.
     """
     profile = suite.profiles[case.profile]
     request = ChatRequest(message=case.query, user_profile=profile)
     capture: dict = {}
+
+    tags = ["ragas_eval", case.category.value]
+    if total_runs > 1:
+        tags.append(f"run_{run_idx + 1}_of_{total_runs}")
 
     t0 = time.perf_counter()
     try:
         with propagate_attributes(
             trace_name=case.id,
             session_id=run_id,
-            tags=["ragas_eval", case.category.value],
+            tags=tags,
         ):
             response = run_chat(request, _eval_capture=capture)
     except Exception as e:
@@ -332,6 +341,50 @@ def score_with_ragas(answer_cases: list[AnswerCase], judge_model: str):
         llm=judge,
         run_config=RunConfig(max_workers=RAGAS_MAX_WORKERS),
     )
+
+
+# ---------- Multi-run score aggregation ----------
+
+def _aggregate_score_dfs(dfs: list):
+    """
+    Aggregate per-run RAGAS score DataFrames into one mean DataFrame plus a
+    matching stddev DataFrame.
+
+    Why average at all: RAGAS faithfulness and answer_relevancy are two-stage
+    LLM pipelines (claim extraction → verification, or noncommittal-flag →
+    synthetic-question generation). Both stages are stochastic — at temp=0
+    the OpenAI/Anthropic APIs still drift across calls — so single-shot
+    scores swing 0.05–0.30 run-to-run on the same answer. Averaging across
+    N runs gives a value tight enough to compare against thresholds
+    (e.g. "is faithfulness ≥ 0.9?") without the swing dominating.
+
+    Inputs must all have the same row order — RAGAS preserves the order it
+    received the dataset in, and we feed the same answer_cases list each
+    run, so this holds. Non-metric columns (user_input, response, ...) are
+    taken from dfs[0]; only METRIC_COLUMNS are averaged.
+
+    For N=1 returns (dfs[0], None) so callers can branch on `stds is None`
+    to skip the variance display.
+    """
+    if len(dfs) == 1:
+        return dfs[0], None
+
+    import numpy as np
+    means = dfs[0].copy()
+    stds = dfs[0].copy()
+    for metric in METRIC_COLUMNS:
+        if all(metric in df.columns for df in dfs):
+            stacked = np.stack([df[metric].to_numpy() for df in dfs])
+            means[metric] = stacked.mean(axis=0)
+            stds[metric] = stacked.std(axis=0)
+    return means, stds
+
+
+def _fmt_score(mean: float, std: float | None) -> str:
+    """Format a score as 'mean' (single run) or 'mean ± std' (multi-run)."""
+    if std is None:
+        return f"{mean:.3f}"
+    return f"{mean:.3f} ± {std:.3f}"
 
 
 # ---------- Langfuse score attachment ----------
@@ -476,16 +529,31 @@ def _print_routing_summary(routing_results: list[RoutingResult]) -> None:
     print(f"  TOTAL  {total_passed}/{total} passed  ({total_time:.1f}s)")
 
 
-def _print_ragas_aggregate(scores_df, n_cases: int, answer_cases: list[AnswerCase]) -> None:
+def _print_ragas_aggregate(
+    means_df,
+    stds_df,
+    n_cases: int,
+    n_runs: int,
+    answer_cases: list[AnswerCase],
+) -> None:
     print()
     print("=" * 72)
-    print("  RAGAS AGGREGATE SCORES (answer cases only)")
+    suffix = f" (averaged over {n_runs} runs)" if n_runs > 1 else ""
+    print(f"  RAGAS AGGREGATE SCORES{suffix}")
     print("=" * 72)
     print(f"  Cases scored: {n_cases}")
     for metric in METRIC_COLUMNS:
-        if metric in scores_df.columns:
-            mean = scores_df[metric].mean()
-            print(f"  {metric:<45} {mean:.3f}")
+        if metric in means_df.columns:
+            mean = means_df[metric].mean()
+            if stds_df is not None and metric in stds_df.columns:
+                # Pool variance across cases AND runs to get an honest
+                # uncertainty on the aggregate. The per-case std is run-to-run
+                # noise; we report mean of those alongside the cross-case mean
+                # so the reader sees the typical judge variance per case.
+                avg_per_case_std = stds_df[metric].mean()
+                print(f"  {metric:<45} {mean:.3f}  (±{avg_per_case_std:.3f} per-case judge variance)")
+            else:
+                print(f"  {metric:<45} {mean:.3f}")
 
     stats = _source_diversity_stats(answer_cases)
     print()
@@ -503,7 +571,9 @@ def _print_ragas_aggregate(scores_df, n_cases: int, answer_cases: list[AnswerCas
 def _markdown_report(
     routing_results: list[RoutingResult],
     answer_cases: list[AnswerCase],
-    scores_df,
+    scores_df,           # means_df when n_runs > 1
+    stds_df,             # None when n_runs == 1
+    n_runs: int,
     judge_model: str,
     note: str | None,
     timestamp: str,
@@ -514,11 +584,12 @@ def _markdown_report(
     total_time = sum(r.elapsed_s for r in routing_results)
     routing_pass_rate = (n_routing_passed / n_total * 100) if n_total else 0.0
 
+    runs_note = f"  **Runs averaged:** {n_runs}" if n_runs > 1 else ""
     lines: list[str] = [
         f"# Poshan Saathi — Eval {timestamp}",
         "",
         f"**Total time:** {total_time:.1f}s  "
-        f"**Judge model:** `{judge_model}` (temperature 0)",
+        f"**Judge model:** `{judge_model}` (temperature 0){runs_note}",
         "",
     ]
 
@@ -561,13 +632,27 @@ def _markdown_report(
             "",
         ]
     else:
+        averaged = f" averaged over {n_runs} runs" if n_runs > 1 else ""
         lines += [
             f"**{n_scored} answer case(s)** scored on three reference-free "
-            "metrics. Higher is better; 1.0 is the ceiling.",
+            f"metrics{averaged}. Higher is better; 1.0 is the ceiling.",
             "",
-            "| Metric | Mean score | What it measures |",
-            "|---|---|---|",
         ]
+        if n_runs > 1:
+            lines += [
+                "_The_ ± _figure is the average per-case stddev across runs — a"
+                " direct measure of RAGAS judge variance for this run. Anything"
+                " under ~0.05 is tight; over ~0.15 means the judge is unstable on"
+                " these cases and the mean should be read with caution._",
+                "",
+                "| Metric | Mean ± per-case stddev | What it measures |",
+                "|---|---|---|",
+            ]
+        else:
+            lines += [
+                "| Metric | Mean score | What it measures |",
+                "|---|---|---|",
+            ]
         metric_descriptions = {
             "faithfulness": "Are the answer's claims supported by the retrieved chunks?",
             "answer_relevancy": "Does the answer actually address the question asked?",
@@ -576,8 +661,13 @@ def _markdown_report(
         for metric in METRIC_COLUMNS:
             if metric in scores_df.columns:
                 mean = scores_df[metric].mean()
+                if stds_df is not None and metric in stds_df.columns:
+                    avg_std = stds_df[metric].mean()
+                    score_str = f"{mean:.3f} ± {avg_std:.3f}"
+                else:
+                    score_str = f"{mean:.3f}"
                 lines.append(
-                    f"| {metric} | {mean:.3f} | {metric_descriptions[metric]} |"
+                    f"| {metric} | {score_str} | {metric_descriptions[metric]} |"
                 )
         lines.append("")
 
@@ -627,12 +717,21 @@ def _markdown_report(
             "| ID | Category | Faithfulness | Answer relevancy | Context precision | Retrieved |",
             "|---|---|---|---|---|---|",
         ]
-        for ac, (_, row) in zip(answer_cases, scores_df.iterrows()):
+        for i, (ac, (_, row)) in enumerate(zip(answer_cases, scores_df.iterrows())):
+            std_row = stds_df.iloc[i] if stds_df is not None else None
+
+            def _cell(metric: str) -> str:
+                mean = row.get(metric, float("nan"))
+                if std_row is None:
+                    return f"{mean:.3f}"
+                std = std_row.get(metric, float("nan"))
+                return f"{mean:.3f} ± {std:.3f}"
+
             lines.append(
                 f"| {ac.case.id} | {ac.case.category.value} "
-                f"| {row.get('faithfulness', float('nan')):.3f} "
-                f"| {row.get('answer_relevancy', float('nan')):.3f} "
-                f"| {row.get('llm_context_precision_without_reference', float('nan')):.3f} "
+                f"| {_cell('faithfulness')} "
+                f"| {_cell('answer_relevancy')} "
+                f"| {_cell('llm_context_precision_without_reference')} "
                 f"| {_format_source_breakdown(ac.chunks)} |"
             )
         lines.append("")
@@ -710,10 +809,26 @@ def main() -> int:
     )
     parser.add_argument("--no-report", action="store_true", help="Skip writing the markdown report")
     parser.add_argument(
+        "--runs",
+        type=int,
+        default=1,
+        help=(
+            "Run the full pipeline + RAGAS scoring N times and average the "
+            "scores. Recommended: 3 for canonical comparison numbers (RAGAS "
+            "judge variance is the dominant source of run-to-run swing). "
+            "Cost scales linearly: each extra run is another ~17 pipeline "
+            "calls + ~150-300 judge calls. Default 1."
+        ),
+    )
+    parser.add_argument(
         "-m", "--note",
         help="Short message about what changed since the last run, embedded in the report",
     )
     args = parser.parse_args()
+
+    if args.runs < 1:
+        print(f"--runs must be >= 1 (got {args.runs}).")
+        return 2
 
     try:
         suite = load_suite()
@@ -739,29 +854,62 @@ def main() -> int:
         print(f"Note: {args.note}")
     print()
 
-    routing_results: list[RoutingResult] = []
-    answer_cases: list[AnswerCase] = []
-
     by_category: dict[str, list[TestCase]] = defaultdict(list)
     for c in cases:
         by_category[c.category.value].append(c)
 
-    for category in sorted(by_category):
-        print(f"[{category}]")
-        for case in by_category[category]:
-            routing, answer_case = run_and_capture(case, suite, run_id)
-            routing_results.append(routing)
+    # First-run results are kept verbatim for display (routing table, answer
+    # previews, source breakdown). Subsequent runs only contribute their
+    # RAGAS score DataFrame to the variance-aware aggregate. Routing is
+    # nearly deterministic (classifier at temp=0); displaying N copies of
+    # near-identical answers would inflate the report without adding signal.
+    display_routing_results: list[RoutingResult] = []
+    display_answer_cases: list[AnswerCase] = []
+    all_score_dfs: list = []
 
-            label = "PASS" if routing.passed else "FAIL"
-            marker = "✓" if routing.passed else "✗"
-            ragas_tag = " + captured for RAGAS" if answer_case is not None else ""
-            print(
-                f"  {marker} [{label}] {case.id:<28} "
-                f"({routing.elapsed_s:.2f}s)  {routing.reason}{ragas_tag}"
-            )
-            if answer_case is not None:
-                answer_cases.append(answer_case)
-        print()
+    for run_idx in range(args.runs):
+        if args.runs > 1:
+            print()
+            print("─" * 72)
+            print(f"  RUN {run_idx + 1} of {args.runs}")
+            print("─" * 72)
+
+        run_routing_results: list[RoutingResult] = []
+        run_answer_cases: list[AnswerCase] = []
+
+        for category in sorted(by_category):
+            print(f"[{category}]")
+            for case in by_category[category]:
+                routing, answer_case = run_and_capture(
+                    case, suite, run_id,
+                    run_idx=run_idx, total_runs=args.runs,
+                )
+                run_routing_results.append(routing)
+
+                label = "PASS" if routing.passed else "FAIL"
+                marker = "✓" if routing.passed else "✗"
+                ragas_tag = " + captured for RAGAS" if answer_case is not None else ""
+                print(
+                    f"  {marker} [{label}] {case.id:<28} "
+                    f"({routing.elapsed_s:.2f}s)  {routing.reason}{ragas_tag}"
+                )
+                if answer_case is not None:
+                    run_answer_cases.append(answer_case)
+            print()
+
+        if run_idx == 0:
+            display_routing_results = run_routing_results
+            display_answer_cases = run_answer_cases
+
+        if run_answer_cases:
+            print(f"Scoring {len(run_answer_cases)} answer case(s) "
+                  f"with RAGAS judge={args.judge_model}...")
+            print("(Each case ≈ 3-9 judge LLM calls. This takes a minute.)")
+            result = score_with_ragas(run_answer_cases, judge_model=args.judge_model)
+            all_score_dfs.append(result.to_pandas())
+
+    routing_results = display_routing_results
+    answer_cases = display_answer_cases
 
     _print_routing_summary(routing_results)
 
@@ -772,6 +920,8 @@ def main() -> int:
                 routing_results=routing_results,
                 answer_cases=[],
                 scores_df=None,
+                stds_df=None,
+                n_runs=args.runs,
                 judge_model=args.judge_model,
                 note=args.note,
                 run_id=run_id,
@@ -780,17 +930,20 @@ def main() -> int:
         flush_traces()
         return 0 if all(r.passed for r in routing_results) else 1
 
-    print(f"\nScoring {len(answer_cases)} answer case(s) with RAGAS judge={args.judge_model}...")
-    print("(Each case ≈ 3-9 judge LLM calls. This takes a minute.)")
-    print()
-
-    result = score_with_ragas(answer_cases, judge_model=args.judge_model)
-    df = result.to_pandas()
-    _print_ragas_aggregate(df, n_cases=len(answer_cases), answer_cases=answer_cases)
+    means_df, stds_df = _aggregate_score_dfs(all_score_dfs)
+    _print_ragas_aggregate(
+        means_df, stds_df,
+        n_cases=len(answer_cases),
+        n_runs=args.runs,
+        answer_cases=answer_cases,
+    )
 
     if not args.no_langfuse_scores and settings.langfuse_enabled:
-        n = attach_scores_to_langfuse(answer_cases, df, judge_model=args.judge_model)
-        print(f"\n  Attached {n} score(s) to Langfuse traces.")
+        # Attach the AVERAGED scores to the run-1 traces (the only ones whose
+        # answer text is in the report). This gives a stable, comparable
+        # dashboard score per case without N duplicates per metric.
+        n = attach_scores_to_langfuse(answer_cases, means_df, judge_model=args.judge_model)
+        print(f"\n  Attached {n} averaged score(s) to Langfuse traces.")
         print(f"  View session: https://cloud.langfuse.com/sessions/{run_id}")
     elif not settings.langfuse_enabled:
         print("\n  (Langfuse not configured — skipping score attachment.)")
@@ -799,7 +952,9 @@ def main() -> int:
         path = write_markdown_report(
             routing_results=routing_results,
             answer_cases=answer_cases,
-            scores_df=df,
+            scores_df=means_df,
+            stds_df=stds_df,
+            n_runs=args.runs,
             judge_model=args.judge_model,
             note=args.note,
             run_id=run_id,

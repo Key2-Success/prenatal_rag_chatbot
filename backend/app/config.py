@@ -86,7 +86,7 @@ class Settings(BaseSettings):
     reranker_model: str = "bge-reranker-v2-m3"
 
     # --- LLM knobs ---
-    llm_model: str = "gpt-4.1-nano"
+    llm_model: str = "gpt-4.1-mini"
     # Lower temperature = more consistent, factual answers (good for medical).
     llm_temperature: float = 0.3
 

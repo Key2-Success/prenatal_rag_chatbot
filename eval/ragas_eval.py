@@ -320,7 +320,11 @@ def _build_judge(judge_model: str) -> LangchainLLMWrapper:
     return LangchainLLMWrapper(chat)
 
 
-def score_with_ragas(answer_cases: list[AnswerCase], judge_model: str):
+def score_with_ragas(
+    answer_cases: list[AnswerCase],
+    judge_model: str,
+    max_workers: int = RAGAS_MAX_WORKERS,
+):
     """
     Run the three reference-free RAGAS metrics. Returns the result object.
 
@@ -328,6 +332,10 @@ def score_with_ragas(answer_cases: list[AnswerCase], judge_model: str):
     blow through per-minute token limits — a fan-out of 10+ workers will trip
     Tier-1 OpenAI/Anthropic accounts in seconds. See RAGAS judge-config.md
     "Concurrency / batch size".
+
+    `max_workers` is overridable so the parallel-runs path can divide the
+    global concurrency budget across N concurrent RAGAS sessions (otherwise
+    we'd multiply concurrent calls by N and blow through rate limits).
     """
     dataset = build_ragas_dataset(answer_cases)
     judge = _build_judge(judge_model)
@@ -339,7 +347,7 @@ def score_with_ragas(answer_cases: list[AnswerCase], judge_model: str):
             LLMContextPrecisionWithoutReference(),
         ],
         llm=judge,
-        run_config=RunConfig(max_workers=RAGAS_MAX_WORKERS),
+        run_config=RunConfig(max_workers=max_workers),
     )
 
 
@@ -916,6 +924,92 @@ def write_markdown_report(*args, run_id: str, **kwargs) -> Path:
     return path
 
 
+# ---------- Per-run executor (used by both sequential and parallel paths) ----------
+
+def _execute_one_run(
+    run_idx: int,
+    total_runs: int,
+    by_category: dict,
+    suite: EvalSuite,
+    run_id: str,
+    judge_model: str,
+    ragas_max_workers: int,
+    capture_output: bool,
+):
+    """
+    Execute one full pipeline + RAGAS scoring pass for all cases.
+
+    Returns: (routing_results, answer_cases, score_df_or_None, output_lines, elapsed_s).
+
+    capture_output controls where progress lines go:
+      - False (sequential mode) — printed live to stdout, output_lines is empty.
+      - True (parallel mode) — collected into output_lines for the caller to
+        print as a single block when this run completes, so three concurrent
+        runs don't interleave their per-case PASS/FAIL lines into chaos.
+
+    Thread-safety notes (relevant when called from a ThreadPoolExecutor):
+      - The Pinecone and OpenAI module-level client singletons are HTTP-based
+        and thread-safe.
+      - run_chat is functionally pure (no shared mutable state).
+      - propagate_attributes uses contextvars, which are thread-local — each
+        thread gets its own Langfuse trace context, so session_id and tags
+        don't leak across runs.
+    """
+    output_lines: list[str] = []
+
+    def emit(line: str = "") -> None:
+        if capture_output:
+            output_lines.append(line)
+        else:
+            print(line)
+
+    t0 = time.perf_counter()
+
+    if total_runs > 1 and not capture_output:
+        emit()
+        emit("─" * 72)
+        emit(f"  RUN {run_idx + 1} of {total_runs}")
+        emit("─" * 72)
+
+    routing_results: list[RoutingResult] = []
+    answer_cases: list[AnswerCase] = []
+
+    for category in sorted(by_category):
+        emit(f"[{category}]")
+        for case in by_category[category]:
+            routing, answer_case = run_and_capture(
+                case, suite, run_id,
+                run_idx=run_idx, total_runs=total_runs,
+            )
+            routing_results.append(routing)
+
+            label = "PASS" if routing.passed else "FAIL"
+            marker = "✓" if routing.passed else "✗"
+            ragas_tag = " + captured for RAGAS" if answer_case is not None else ""
+            emit(
+                f"  {marker} [{label}] {case.id:<28} "
+                f"({routing.elapsed_s:.2f}s)  {routing.reason}{ragas_tag}"
+            )
+            if answer_case is not None:
+                answer_cases.append(answer_case)
+        emit()
+
+    score_df = None
+    if answer_cases:
+        emit(f"Scoring {len(answer_cases)} answer case(s) "
+             f"with RAGAS judge={judge_model} (max_workers={ragas_max_workers})...")
+        emit("(Each case ≈ 3-9 judge LLM calls.)")
+        result = score_with_ragas(
+            answer_cases,
+            judge_model=judge_model,
+            max_workers=ragas_max_workers,
+        )
+        score_df = result.to_pandas()
+
+    elapsed = time.perf_counter() - t0
+    return routing_results, answer_cases, score_df, output_lines, elapsed
+
+
 # ---------- Filtering ----------
 
 def _filter_cases(cases, category: str | None, case_id: str | None):
@@ -958,6 +1052,19 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--parallel-runs",
+        action="store_true",
+        help=(
+            "Run the N --runs concurrently in a thread pool instead of "
+            "sequentially. Wall-clock cost drops to ~max(per-run-time) instead "
+            "of N × per-run-time. Total API calls and dollar cost are "
+            "unchanged. To stay within rate limits, RAGAS max_workers is "
+            "auto-divided by N (so 3 parallel runs each use 1-2 internal "
+            "workers, keeping total concurrent judge calls roughly constant). "
+            "Default off — opt in only if you know your account tier."
+        ),
+    )
+    parser.add_argument(
         "-m", "--note",
         help="Short message about what changed since the last run, embedded in the report",
     )
@@ -966,6 +1073,10 @@ def main() -> int:
     if args.runs < 1:
         print(f"--runs must be >= 1 (got {args.runs}).")
         return 2
+
+    if args.parallel_runs and args.runs == 1:
+        print("--parallel-runs has no effect with --runs 1; ignoring.")
+        args.parallel_runs = False
 
     try:
         suite = load_suite()
@@ -998,58 +1109,80 @@ def main() -> int:
     # First-run results are kept verbatim for display (routing table, answer
     # previews, source breakdown). Subsequent runs contribute (a) RAGAS score
     # DataFrames for variance-aware averaging, and (b) their full RoutingResult
-    # list for routing-flakiness aggregation. Routing is nearly deterministic
-    # (classifier at temp=0) but not guaranteed to be — surfacing per-run
-    # pass counts and per-case pass-N-of-M counters catches the case where it
-    # isn't.
+    # list for routing-flakiness aggregation.
     display_routing_results: list[RoutingResult] = []
     display_answer_cases: list[AnswerCase] = []
     all_score_dfs: list = []
-    all_routing_results: list[list[RoutingResult]] = []
+    all_routing_results: list[list[RoutingResult]] = [None] * args.runs  # filled by index
+    per_run_answer_cases: list[list[AnswerCase] | None] = [None] * args.runs
+
+    # Auto-divide RAGAS internal concurrency when parallelising runs, so the
+    # total concurrent judge calls (N runs × per-run workers) stays within the
+    # rate-limit budget the single-run config was sized for. Floor of 1 worker
+    # per run — fewer than that means RAGAS can't make progress.
+    if args.parallel_runs:
+        ragas_max_workers = max(1, RAGAS_MAX_WORKERS // args.runs)
+        print(
+            f"Parallel mode: {args.runs} runs concurrent, each with "
+            f"RAGAS max_workers={ragas_max_workers} (divided from "
+            f"{RAGAS_MAX_WORKERS} to keep total concurrent judge calls "
+            f"≈ {ragas_max_workers * args.runs}, within rate-limit budget)."
+        )
+        print()
+    else:
+        ragas_max_workers = RAGAS_MAX_WORKERS
 
     overall_t0 = time.perf_counter()
 
-    for run_idx in range(args.runs):
-        if args.runs > 1:
-            print()
-            print("─" * 72)
-            print(f"  RUN {run_idx + 1} of {args.runs}")
-            print("─" * 72)
+    if args.parallel_runs:
+        # Threaded path: submit all N runs concurrently. Each run captures its
+        # own progress lines into a buffer; we print each buffer as a single
+        # block when the run completes (in completion order, not submit order)
+        # so concurrent runs don't interleave their output into chaos.
+        from concurrent.futures import ThreadPoolExecutor, as_completed
 
-        run_routing_results: list[RoutingResult] = []
-        run_answer_cases: list[AnswerCase] = []
+        with ThreadPoolExecutor(max_workers=args.runs) as pool:
+            future_to_idx = {
+                pool.submit(
+                    _execute_one_run,
+                    run_idx, args.runs, by_category, suite, run_id,
+                    args.judge_model, ragas_max_workers,
+                    True,  # capture_output
+                ): run_idx
+                for run_idx in range(args.runs)
+            }
+            for future in as_completed(future_to_idx):
+                run_idx = future_to_idx[future]
+                routing_results, answer_cases, score_df, output_lines, elapsed = future.result()
 
-        for category in sorted(by_category):
-            print(f"[{category}]")
-            for case in by_category[category]:
-                routing, answer_case = run_and_capture(
-                    case, suite, run_id,
-                    run_idx=run_idx, total_runs=args.runs,
-                )
-                run_routing_results.append(routing)
+                all_routing_results[run_idx] = routing_results
+                per_run_answer_cases[run_idx] = answer_cases
+                if score_df is not None:
+                    all_score_dfs.append(score_df)
 
-                label = "PASS" if routing.passed else "FAIL"
-                marker = "✓" if routing.passed else "✗"
-                ragas_tag = " + captured for RAGAS" if answer_case is not None else ""
-                print(
-                    f"  {marker} [{label}] {case.id:<28} "
-                    f"({routing.elapsed_s:.2f}s)  {routing.reason}{ragas_tag}"
-                )
-                if answer_case is not None:
-                    run_answer_cases.append(answer_case)
-            print()
+                print()
+                print("┌" + "─" * 70 + "┐")
+                print(f"│  RUN {run_idx + 1} of {args.runs} COMPLETED in {elapsed:.1f}s"
+                      .ljust(71) + "│")
+                print("└" + "─" * 70 + "┘")
+                for line in output_lines:
+                    print(line)
+    else:
+        # Sequential path: progress prints live to stdout as it happens.
+        for run_idx in range(args.runs):
+            routing_results, answer_cases, score_df, _, _ = _execute_one_run(
+                run_idx, args.runs, by_category, suite, run_id,
+                args.judge_model, ragas_max_workers,
+                False,  # capture_output
+            )
+            all_routing_results[run_idx] = routing_results
+            per_run_answer_cases[run_idx] = answer_cases
+            if score_df is not None:
+                all_score_dfs.append(score_df)
 
-        all_routing_results.append(run_routing_results)
-        if run_idx == 0:
-            display_routing_results = run_routing_results
-            display_answer_cases = run_answer_cases
-
-        if run_answer_cases:
-            print(f"Scoring {len(run_answer_cases)} answer case(s) "
-                  f"with RAGAS judge={args.judge_model}...")
-            print("(Each case ≈ 3-9 judge LLM calls. This takes a minute.)")
-            result = score_with_ragas(run_answer_cases, judge_model=args.judge_model)
-            all_score_dfs.append(result.to_pandas())
+    # Display data is always from run 1 regardless of completion order.
+    display_routing_results = all_routing_results[0]
+    display_answer_cases = per_run_answer_cases[0] or []
 
     overall_elapsed_s = time.perf_counter() - overall_t0
 

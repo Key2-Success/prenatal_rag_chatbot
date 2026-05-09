@@ -508,25 +508,90 @@ def _group_by_category(results: list[RoutingResult]) -> dict[str, list[RoutingRe
     return by_category
 
 
-def _print_routing_summary(routing_results: list[RoutingResult]) -> None:
+def _flaky_cases(all_routing_results: list[list[RoutingResult]]) -> dict[str, int]:
+    """Map case_id → number of runs in which that case PASSED.
+
+    Used to surface routing flakiness: a case that passes 2 of 3 runs is
+    visibly different from one that passes all 3. Without this view a single
+    flaky case can hide inside an "average pass rate" number.
+    """
+    pass_count: dict[str, int] = defaultdict(int)
+    for run in all_routing_results:
+        for r in run:
+            if r.passed:
+                pass_count[r.case.id] += 1
+    return dict(pass_count)
+
+
+def _print_routing_summary(
+    all_routing_results: list[list[RoutingResult]],
+    overall_elapsed_s: float,
+) -> None:
+    """
+    Print the routing summary across N runs.
+
+    For N==1 this collapses to the previous single-run view. For N>1 we show
+    per-run pass counts (so a flaky case is visible as e.g. 25/26, 26/26,
+    25/26 instead of being averaged into 25.3) plus the average and any
+    cases that didn't pass every run.
+    """
+    n_runs = len(all_routing_results)
     print()
     print("=" * 72)
-    print("  ROUTING SUMMARY (all cases)")
+    suffix = f"  (across {n_runs} runs)" if n_runs > 1 else ""
+    print(f"  ROUTING SUMMARY{suffix}")
     print("=" * 72)
 
-    by_category = _group_by_category(routing_results)
+    # Category-level pass counts come from run 1 (categorisation is fixed by
+    # the test suite; the run dimension only affects pass/fail per case).
+    by_category = _group_by_category(all_routing_results[0])
     for category in sorted(by_category):
         items = by_category[category]
         passed = sum(1 for r in items if r.passed)
         total = len(items)
         bar = "█" * passed + "░" * (total - passed)
-        print(f"  {category:<25} {passed}/{total}  {bar}")
+        suffix = "  (run 1)" if n_runs > 1 else ""
+        print(f"  {category:<25} {passed}/{total}  {bar}{suffix}")
 
-    total_passed = sum(1 for r in routing_results if r.passed)
-    total = len(routing_results)
-    total_time = sum(r.elapsed_s for r in routing_results)
+    if n_runs > 1:
+        print()
+        print(f"  Per-run pass counts (out of {len(all_routing_results[0])}):")
+        for run_idx, run in enumerate(all_routing_results):
+            n_pass = sum(1 for r in run if r.passed)
+            n_total = len(run)
+            print(f"    run {run_idx + 1}: {n_pass}/{n_total}")
+
+        avg_pass = sum(
+            sum(1 for r in run if r.passed) for run in all_routing_results
+        ) / n_runs
+        n_total = len(all_routing_results[0])
+        print(f"    average:  {avg_pass:.1f}/{n_total}")
+
+        # Surface flaky cases — passed some runs, failed others.
+        pass_count = _flaky_cases(all_routing_results)
+        flaky = [
+            (cid, count) for cid, count in pass_count.items()
+            if 0 < count < n_runs
+        ]
+        # Cases that failed every run are NOT flaky — they're consistently failing.
+        # List those separately.
+        all_case_ids = {r.case.id for r in all_routing_results[0]}
+        always_failing = sorted(all_case_ids - set(pass_count.keys()))
+
+        if flaky:
+            print()
+            print(f"  Flaky cases (passed some runs, not others):")
+            for cid, count in sorted(flaky):
+                print(f"    {cid:<35} passed {count}/{n_runs} runs")
+        if always_failing:
+            print()
+            print(f"  Consistently failing cases:")
+            for cid in always_failing:
+                print(f"    {cid}")
+
     print()
-    print(f"  TOTAL  {total_passed}/{total} passed  ({total_time:.1f}s)")
+    print(f"  Wall-clock total: {overall_elapsed_s:.1f}s "
+          f"(includes pipeline + RAGAS scoring across all {n_runs} run(s))")
 
 
 def _print_ragas_aggregate(
@@ -569,7 +634,9 @@ def _print_ragas_aggregate(
 # ---------- Markdown report ----------
 
 def _markdown_report(
-    routing_results: list[RoutingResult],
+    routing_results: list[RoutingResult],            # run-1 results, for the per-case detail table
+    all_routing_results: list[list[RoutingResult]],  # all N runs, for aggregate pass-rate stats
+    overall_elapsed_s: float,                         # wall-clock total across runs + scoring
     answer_cases: list[AnswerCase],
     scores_df,           # means_df when n_runs > 1
     stds_df,             # None when n_runs == 1
@@ -579,16 +646,25 @@ def _markdown_report(
     timestamp: str,
 ) -> str:
     n_total = len(routing_results)
-    n_routing_passed = sum(1 for r in routing_results if r.passed)
     n_scored = len(answer_cases)
-    total_time = sum(r.elapsed_s for r in routing_results)
-    routing_pass_rate = (n_routing_passed / n_total * 100) if n_total else 0.0
 
-    runs_note = f"  **Runs averaged:** {n_runs}" if n_runs > 1 else ""
+    # Per-case pass count across runs — used both in the summary and in the
+    # detail table to surface flakiness (case passes 2/3 runs, etc.).
+    pass_count_by_id = _flaky_cases(all_routing_results)
+
+    # Per-run pass counts.
+    per_run_passed = [
+        sum(1 for r in run if r.passed) for run in all_routing_results
+    ]
+    avg_passed = sum(per_run_passed) / n_runs
+    avg_pass_rate = (avg_passed / n_total * 100) if n_total else 0.0
+
+    runs_note = f"  **Runs:** {n_runs}" if n_runs > 1 else ""
     lines: list[str] = [
         f"# Poshan Saathi — Eval {timestamp}",
         "",
-        f"**Total time:** {total_time:.1f}s  "
+        f"**Wall-clock total:** {overall_elapsed_s:.1f}s "
+        f"(pipeline + RAGAS scoring across all {n_runs} run{'s' if n_runs > 1 else ''})  "
         f"**Judge model:** `{judge_model}` (temperature 0){runs_note}",
         "",
     ]
@@ -608,18 +684,69 @@ def _markdown_report(
         "",
         "### Layer 1 — Routing",
         "",
-        f"**{n_routing_passed}/{n_total} passed ({routing_pass_rate:.0f}%)** "
-        "across all cases. Checks `response_type` matches expected behavior, "
-        "and (for answer cases) the first cited source matches `cites_org`.",
-        "",
+    ]
+
+    if n_runs > 1:
+        # Multi-run: show per-run pass counts AND the average. A single
+        # collapsed number would hide a flaky case (passes 2 of 3 runs).
+        lines += [
+            f"**Average: {avg_passed:.1f}/{n_total} passed ({avg_pass_rate:.0f}%)** "
+            f"across {n_runs} runs. Per-run breakdown:",
+            "",
+            "| Run | Passed | Total |",
+            "|---|---|---|",
+        ]
+        for i, n_pass in enumerate(per_run_passed):
+            lines.append(f"| {i + 1} | {n_pass} | {n_total} |")
+        lines.append("")
+
+        # Flaky cases — passed some runs, failed others. Distinct from
+        # consistently-failing cases, which need different triage.
+        all_case_ids = [r.case.id for r in routing_results]  # preserve order
+        flaky = [
+            (cid, pass_count_by_id.get(cid, 0))
+            for cid in all_case_ids
+            if 0 < pass_count_by_id.get(cid, 0) < n_runs
+        ]
+        always_failing = [
+            cid for cid in all_case_ids if pass_count_by_id.get(cid, 0) == 0
+        ]
+        if flaky:
+            lines += [
+                "**Flaky cases** (non-deterministic routing across runs — should be 0):",
+                "",
+            ]
+            for cid, count in flaky:
+                lines.append(f"- `{cid}` — passed {count}/{n_runs} runs")
+            lines.append("")
+        if always_failing:
+            lines += [
+                "**Consistently failing cases**:",
+                "",
+            ]
+            for cid in always_failing:
+                lines.append(f"- `{cid}`")
+            lines.append("")
+    else:
+        n_routing_passed = per_run_passed[0]
+        routing_pass_rate = (n_routing_passed / n_total * 100) if n_total else 0.0
+        lines += [
+            f"**{n_routing_passed}/{n_total} passed ({routing_pass_rate:.0f}%)** "
+            "across all cases. Checks `response_type` matches expected behavior, "
+            "and (for answer cases) the first cited source matches `cites_org`.",
+            "",
+        ]
+
+    lines += [
         "| Category | Passed | Total |",
         "|---|---|---|",
     ]
     by_category = _group_by_category(routing_results)
+    suffix = "  _(run 1)_" if n_runs > 1 else ""
     for category in sorted(by_category):
         items = by_category[category]
         passed = sum(1 for r in items if r.passed)
-        lines.append(f"| {category} | {passed} | {len(items)} |")
+        lines.append(f"| {category}{suffix} | {passed} | {len(items)} |")
     lines.append("")
 
     lines += [
@@ -672,17 +799,27 @@ def _markdown_report(
         lines.append("")
 
     # ── Section 1: Routing breakdown ─────────────────────────────────────────
+    multi_run_note = (
+        f" The Pass column shows runs-passed-out-of-{n_runs}; "
+        f"anything other than {n_runs}/{n_runs} is non-deterministic and "
+        "needs investigation. Other columns (Actual, Cites, Time) are from run 1."
+    ) if n_runs > 1 else ""
+    pass_header = f"Pass ({n_runs} runs)" if n_runs > 1 else "Status"
     lines += [
         "## Routing breakdown",
         "",
         "Per-case detail for all cases — useful when a category in the summary "
-        "above is below 100% and you need to find the failing case quickly.",
+        f"above is below 100% and you need to find the failing case quickly.{multi_run_note}",
         "",
-        "| ID | Category | Status | Expected | Actual | Cites (exp → got) | Time | Reason |",
+        f"| ID | Category | {pass_header} | Expected | Actual | Cites (exp → got) | Time | Reason |",
         "|---|---|---|---|---|---|---|---|",
     ]
     for r in routing_results:
-        status = "PASS" if r.passed else "FAIL"
+        if n_runs > 1:
+            n_passed = pass_count_by_id.get(r.case.id, 0)
+            status = f"{n_passed}/{n_runs}"
+        else:
+            status = "PASS" if r.passed else "FAIL"
         actual = r.actual_type.value if r.actual_type else "—"
         cites = f"{r.case.expected.cites_org or '—'} → {r.actual_org or '—'}"
         lines.append(
@@ -859,13 +996,18 @@ def main() -> int:
         by_category[c.category.value].append(c)
 
     # First-run results are kept verbatim for display (routing table, answer
-    # previews, source breakdown). Subsequent runs only contribute their
-    # RAGAS score DataFrame to the variance-aware aggregate. Routing is
-    # nearly deterministic (classifier at temp=0); displaying N copies of
-    # near-identical answers would inflate the report without adding signal.
+    # previews, source breakdown). Subsequent runs contribute (a) RAGAS score
+    # DataFrames for variance-aware averaging, and (b) their full RoutingResult
+    # list for routing-flakiness aggregation. Routing is nearly deterministic
+    # (classifier at temp=0) but not guaranteed to be — surfacing per-run
+    # pass counts and per-case pass-N-of-M counters catches the case where it
+    # isn't.
     display_routing_results: list[RoutingResult] = []
     display_answer_cases: list[AnswerCase] = []
     all_score_dfs: list = []
+    all_routing_results: list[list[RoutingResult]] = []
+
+    overall_t0 = time.perf_counter()
 
     for run_idx in range(args.runs):
         if args.runs > 1:
@@ -897,6 +1039,7 @@ def main() -> int:
                     run_answer_cases.append(answer_case)
             print()
 
+        all_routing_results.append(run_routing_results)
         if run_idx == 0:
             display_routing_results = run_routing_results
             display_answer_cases = run_answer_cases
@@ -908,16 +1051,20 @@ def main() -> int:
             result = score_with_ragas(run_answer_cases, judge_model=args.judge_model)
             all_score_dfs.append(result.to_pandas())
 
+    overall_elapsed_s = time.perf_counter() - overall_t0
+
     routing_results = display_routing_results
     answer_cases = display_answer_cases
 
-    _print_routing_summary(routing_results)
+    _print_routing_summary(all_routing_results, overall_elapsed_s)
 
     if not answer_cases:
         print("\nNo answer-producing cases — skipping RAGAS scoring.")
         if not args.no_report:
             path = write_markdown_report(
                 routing_results=routing_results,
+                all_routing_results=all_routing_results,
+                overall_elapsed_s=overall_elapsed_s,
                 answer_cases=[],
                 scores_df=None,
                 stds_df=None,
@@ -928,7 +1075,11 @@ def main() -> int:
             )
             print(f"\n  Report written: {path.relative_to(PROJECT_ROOT)}")
         flush_traces()
-        return 0 if all(r.passed for r in routing_results) else 1
+        # Strictest exit code: any failure in any run is a non-zero exit. A flaky
+    # case that passes 2 of 3 runs still counts as a failure for CI purposes —
+    # routing is supposed to be deterministic, and intermittent failure means
+    # something is wrong even if the "average" looks fine.
+    return 0 if all(r.passed for run in all_routing_results for r in run) else 1
 
     means_df, stds_df = _aggregate_score_dfs(all_score_dfs)
     _print_ragas_aggregate(
@@ -951,6 +1102,8 @@ def main() -> int:
     if not args.no_report:
         path = write_markdown_report(
             routing_results=routing_results,
+            all_routing_results=all_routing_results,
+            overall_elapsed_s=overall_elapsed_s,
             answer_cases=answer_cases,
             scores_df=means_df,
             stds_df=stds_df,
@@ -962,7 +1115,11 @@ def main() -> int:
         print(f"\n  Report written: {path.relative_to(PROJECT_ROOT)}")
 
     flush_traces()
-    return 0 if all(r.passed for r in routing_results) else 1
+    # Strictest exit code: any failure in any run is a non-zero exit. A flaky
+    # case that passes 2 of 3 runs still counts as a failure for CI purposes —
+    # routing is supposed to be deterministic, and intermittent failure means
+    # something is wrong even if the "average" looks fine.
+    return 0 if all(r.passed for run in all_routing_results for r in run) else 1
 
 
 if __name__ == "__main__":

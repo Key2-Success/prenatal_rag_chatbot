@@ -9,10 +9,23 @@ langchain-text-splitters==0.3.3
 # SemanticChunker lives here. Pinned to the 0.3.x line — the 0.4.x series
 # jumps to langchain-core>=1.0.0 which conflicts with the rest of the chain.
 langchain-experimental==0.3.4
-pypdf==5.1.0
+
+# PDF parsing: LlamaParse via llama-cloud-services. Replaces pypdf, which
+# flattened tables into space-separated strings and dropped figures entirely.
+# LlamaParse returns markdown with proper tables (| col | col |), multi-
+# column layouts linearised correctly, and OCR fallback for scanned pages.
+# Used only at ingestion time (`python -m scripts.ingest`), not at runtime.
+# Pinned to a 0.x line because llama-cloud-services is pre-1.0; minor bumps
+# can rename API surfaces. Re-pin after any upgrade.
+llama-cloud-services>=0.6,<0.7
 
 # Data & Config
-pydantic==2.10.4
+# Pydantic relaxed from a hard 2.10.4 pin to >=2.10,<3 — llama-cloud-services
+# requires pydantic>=2.13 transitively (via llama-index-core), and the project
+# only uses stable pydantic v2 APIs (BaseModel, BaseSettings, ValidationError,
+# field defaults) that haven't changed between 2.10 and 2.13. Re-pin to an
+# exact version only if we observe a regression.
+pydantic>=2.10,<3
 pydantic-settings==2.7.0
 python-dotenv==1.0.1
 pandas==2.2.3

@@ -61,6 +61,10 @@ class Settings(BaseSettings):
     # to avoid same-family bias. Optional so the rest of the app runs without
     # an Anthropic key — eval/ragas_eval.py validates this at score time.
     anthropic_api_key: str | None = None
+    # Used only by `python -m scripts.ingest` for LlamaParse-based PDF parsing.
+    # Optional so the running app (which only reads from Pinecone) doesn't
+    # need this key — chunker._build_parser() validates at ingestion time.
+    llama_cloud_api_key: str | None = None
 
     # --- App ---
     pinecone_index_name: str = "poshan-saathi"

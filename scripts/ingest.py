@@ -37,11 +37,26 @@ def _reset_index() -> None:
     Why not delete and recreate the index? Index recreation can take a
     minute on serverless tiers and serial creation hits a stricter rate
     limit. Vector-level delete is instant and equivalent for our purposes.
+
+    Empty-namespace edge case: Pinecone creates the default namespace
+    LAZILY on first upsert. If the index has never had vectors (fresh
+    index, or previously cleared from the console), the namespace doesn't
+    exist and delete_all=True returns 404 "Namespace not found". That's
+    already the desired state — treat it as success and continue.
     """
+    from pinecone.exceptions import NotFoundException
+
     index = get_index()
     print(f"  → Deleting all vectors in '{settings.pinecone_index_name}'...")
-    index.delete(delete_all=True)
-    print("  → Reset complete.")
+    try:
+        index.delete(delete_all=True)
+        print("  → Reset complete.")
+    except NotFoundException as e:
+        if "Namespace not found" in str(e):
+            print("  → Index already empty (default namespace not yet created); "
+                  "nothing to delete.")
+        else:
+            raise
 
 
 def main() -> int:

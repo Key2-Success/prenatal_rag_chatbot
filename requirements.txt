@@ -10,6 +10,15 @@ langchain-text-splitters==0.3.3
 # jumps to langchain-core>=1.0.0 which conflicts with the rest of the chain.
 langchain-experimental==0.3.4
 
+# Cross-encoder reranking: bge-reranker-v2-m3 self-hosted via
+# sentence-transformers (instead of Pinecone Inference's hosted version).
+# Same model — but self-hosted means no per-call API rate limit (Pinecone
+# Inference free tier caps at 500 reranks/month, which is 10 evals at our
+# scale). First call downloads ~600MB to ~/.cache/huggingface; subsequent
+# calls run on CPU at ~50-200ms per (query, 15-candidates) pool.
+# Pin: 3.x is the current stable; 4.x will break the import path again.
+sentence-transformers>=3.0,<4.0
+
 # PDF parsing: LlamaParse via llama-cloud-services. Replaces pypdf, which
 # flattened tables into space-separated strings and dropped figures entirely.
 # LlamaParse returns markdown with proper tables (| col | col |), multi-

@@ -28,8 +28,10 @@ Design decisions:
 """
 
 import hashlib
+import threading
 import uuid
 
+import numpy as np
 from pinecone import Pinecone, ServerlessSpec
 from pydantic import BaseModel
 
@@ -42,11 +44,18 @@ from backend.app.sources import priority_order, priority_rank_by_org
 # Pinecone recommends ≤ 100 vectors per upsert request.
 _UPSERT_BATCH_SIZE = 100
 
-# Module-level singletons. Both index queries and inference rerank share the
-# same authenticated client — creating a new Pinecone() on every call would
-# re-authenticate on each request and bypass connection reuse.
+# Module-level singletons. The Pinecone client handles vector queries only —
+# reranking has moved to a self-hosted CrossEncoder (see _get_reranker).
 _pinecone_client: Pinecone | None = None
 _pinecone_index = None
+
+# Self-hosted cross-encoder reranker singleton + lock. Lazy-loaded on first
+# call (downloads ~600MB the first time, then cached in ~/.cache/huggingface).
+# The lock prevents two concurrent first-callers from each triggering a
+# download — relevant when --parallel-runs has multiple eval threads starting
+# simultaneously. After the first load, _get_reranker() is a pure dict lookup.
+_reranker = None
+_reranker_lock = threading.Lock()
 
 
 class RetrievedChunk(BaseModel):
@@ -65,6 +74,58 @@ def _get_client() -> Pinecone:
     if _pinecone_client is None:
         _pinecone_client = Pinecone(api_key=settings.pinecone_api_key)
     return _pinecone_client
+
+
+def _select_device() -> str:
+    """
+    Pick the best available torch device for cross-encoder inference.
+
+    bge-reranker-v2-m3 is a 568M-parameter model — on CPU each (query, doc)
+    pair takes 2-4 seconds, which scales to ~16 minutes per --runs 3 eval.
+    Hardware acceleration cuts this by 5-10x:
+
+      - "cuda"  → NVIDIA GPU (production servers, Colab)
+      - "mps"   → Apple Silicon Metal (M-series Macs — fast and free locally)
+      - "cpu"   → fallback when neither is available
+
+    Order matters: prefer cuda over mps over cpu, because cuda kernels are
+    more mature for transformer inference. We don't error on missing
+    hardware — cpu is always a valid fallback.
+    """
+    import torch
+    if torch.cuda.is_available():
+        return "cuda"
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
+def _get_reranker():
+    """
+    Return the cached cross-encoder reranker, loading on first call.
+
+    Lazy-loaded so importing this module is cheap (tests, ingest scripts,
+    eval driver all import it without needing the reranker). Thread-safe via
+    a double-checked lock so `--parallel-runs` doesn't race two concurrent
+    first-call downloads of the 568M-param / ~600MB model.
+
+    First call: ~10-30s (model load + device placement).
+    Subsequent calls: instant (singleton lookup).
+    Per-rerank latency for a 15-candidate pool: ~50-200ms on CUDA/MPS,
+    ~2-5s on CPU.
+    """
+    global _reranker
+    if _reranker is not None:
+        return _reranker
+    with _reranker_lock:
+        if _reranker is None:  # double-check after acquiring
+            # Import inside the function so the heavy sentence-transformers /
+            # torch import only happens at first rerank, not at module load.
+            from sentence_transformers import CrossEncoder
+            device = _select_device()
+            print(f"[reranker] Loading {settings.reranker_model} on {device}...")
+            _reranker = CrossEncoder(settings.reranker_model, device=device)
+    return _reranker
 
 
 def get_index():
@@ -201,33 +262,35 @@ def retrieve_and_rerank(query: str) -> list[RetrievedChunk]:
         update_current_span(output={"chunks_returned": 0, "sources_hit": sources_hit})
         return []
 
-    # Stage 2: rerank. Pinecone Inference cross-encoder scores every
-    # (query, candidate) pair and returns the top_k highest-relevance chunks.
-    # Response shape verified against installed SDK source (pinecone_plugins
-    # 5.4.2): RerankResult.data is List[RankedDocument]; each RankedDocument
-    # has .index (int), .score (float), .document (dict, when return_documents=True).
-    rerank_result = _get_client().inference.rerank(
-        model=settings.reranker_model,
-        query=query,
-        documents=[{"id": str(i), "text": c.text} for i, c in enumerate(all_candidates)],
-        top_n=settings.top_k,
-        return_documents=True,
-    )
+    # Stage 2: rerank. Self-hosted bge-reranker-v2-m3 cross-encoder via
+    # sentence-transformers. The reranker is called locally — no API rate
+    # limit and no per-call cost. predict() returns raw logits in input
+    # order; we sigmoid-normalise to a 0-1 score so the numbers in eval
+    # reports and Langfuse traces are comparable to the previous
+    # Pinecone-Inference-hosted output of the same model.
+    reranker = _get_reranker()
+    pairs = [(query, c.text) for c in all_candidates]
+    raw_scores = reranker.predict(pairs)
+    scores = 1.0 / (1.0 + np.exp(-np.asarray(raw_scores)))  # sigmoid
 
-    # Reconstruct RetrievedChunks from the reranker output, preserving all
-    # original metadata. The reranker returns items in relevance order, but
-    # we re-sort in Stage 3, so that order is intentionally discarded here.
+    # Pick the top_k candidates by reranker score. The returned indices point
+    # back into all_candidates so we can preserve full metadata.
+    top_indices = np.argsort(-scores)[: settings.top_k]
+
+    # Reconstruct RetrievedChunks from the top picks. The reranker order is
+    # intentionally discarded here — Stage 3 re-sorts by (source priority,
+    # reranker score) for the final output ordering.
     ranked: list[RetrievedChunk] = []
     rank_by_org = priority_rank_by_org()
-    for item in rerank_result.data:
-        original = all_candidates[int(item.index)]
+    for idx in top_indices:
+        original = all_candidates[int(idx)]
         ranked.append(RetrievedChunk(
             text=original.text,
             org_display_name=original.org_display_name,
             doc_title=original.doc_title,
             page_number=original.page_number,
             year_published=original.year_published,
-            score=item.score,  # reranker score replaces cosine similarity
+            score=float(scores[idx]),  # reranker score replaces cosine similarity
         ))
 
     # Stage 3: sort by (source priority ASC, reranker score DESC).

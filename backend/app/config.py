@@ -84,10 +84,12 @@ class Settings(BaseSettings):
     # More → better recall input for the reranker; fewer → cheaper + faster.
     # Start conservative at 5 per source (15 pool max → reranked to top_k=5).
     reranker_candidate_k: int = 3
-    # Pinecone Inference model used for cross-encoder reranking (Stage 2).
-    # bge-reranker-v2-m3 is a strong multilingual cross-encoder; no extra API
-    # key required — uses the existing PINECONE_API_KEY.
-    reranker_model: str = "bge-reranker-v2-m3"
+    # HuggingFace model ID for the cross-encoder reranker (Stage 2).
+    # bge-reranker-v2-m3 is a strong multilingual cross-encoder, self-hosted
+    # via sentence-transformers — no per-call API rate limit. The model is
+    # downloaded once to ~/.cache/huggingface (~600MB) and cached across runs.
+    # Override per-run via env, e.g. RERANKER_MODEL=BAAI/bge-reranker-large.
+    reranker_model: str = "BAAI/bge-reranker-v2-m3"
 
     # --- LLM knobs ---
     llm_model: str = "gpt-4.1-nano"

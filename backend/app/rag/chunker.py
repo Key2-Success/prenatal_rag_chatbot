@@ -183,6 +183,54 @@ def chunk_pdf(file_name: str) -> list[Chunk]:
     return chunks
 
 
+def _report_token_stats(chunks: list[Chunk]) -> None:
+    """
+    Print min / median / p95 / max token counts across all chunks.
+
+    Why we measure: SemanticChunker produces variable-length chunks, which
+    is good for semantic coherence but exposes us to silent-truncation
+    bugs. The two downstream caps that matter:
+      - text-embedding-3-small accepts up to 8191 tokens; anything longer is
+        truncated FROM THE END (you lose the tail of the chunk silently).
+      - bge-reranker-v2-m3 accepts up to 8192 tokens per (query + doc) pair;
+        same truncation behaviour.
+
+    What "safe" looks like for this corpus: max should comfortably sit
+    under ~2000 tokens (typical PDF pages are 300-1200 tokens, and we
+    chunk WITHIN pages). If max approaches 8000, we've found a giant
+    uninterrupted block (probably a long table or an unbreakable
+    monolithic paragraph) and need to either lower the SemanticChunker
+    breakpoint percentile or add a hard-cap splitter as a backstop.
+
+    Uses tiktoken with the cl100k_base encoding — same tokeniser used by
+    text-embedding-3-small. Approximate for the reranker (which uses
+    sentencepiece) but accurate to within ~10-20%, which is plenty for
+    a sanity audit.
+    """
+    import tiktoken
+    enc = tiktoken.get_encoding("cl100k_base")
+
+    lengths = sorted(len(enc.encode(c.text)) for c in chunks)
+    n = len(lengths)
+    p95 = lengths[int(n * 0.95)] if n else 0
+    median = lengths[n // 2] if n else 0
+    longest = lengths[-1] if n else 0
+
+    print()
+    print("Token-length audit (chunk size in tokens):")
+    print(f"  min      = {lengths[0] if n else 0}")
+    print(f"  median   = {median}")
+    print(f"  p95      = {p95}")
+    print(f"  max      = {longest}")
+    print(f"  caps     = 8191 (embedding) / 8192 (reranker)")
+    if longest > 8000:
+        print(f"  ⚠ WARNING: longest chunk ({longest} tokens) is at or above the "
+              f"embedding/reranker cap. The tail will be truncated silently.")
+    elif longest > 4000:
+        print(f"  ⚠ NOTE: longest chunk ({longest} tokens) is unusually long for "
+              f"this corpus — investigate whether a single chunk should be split.")
+
+
 def chunk_all_pdfs() -> list[Chunk]:
     """Chunk every PDF declared in sources.json."""
     all_chunks: list[Chunk] = []
@@ -192,4 +240,5 @@ def chunk_all_pdfs() -> list[Chunk]:
         print(f"  → {len(chunks)} chunks")
         all_chunks.extend(chunks)
     print(f"Total chunks: {len(all_chunks)}")
+    _report_token_stats(all_chunks)
     return all_chunks

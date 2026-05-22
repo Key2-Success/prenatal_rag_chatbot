@@ -124,7 +124,28 @@ def _get_reranker():
             from sentence_transformers import CrossEncoder
             device = _select_device()
             print(f"[reranker] Loading {settings.reranker_model} on {device}...")
-            _reranker = CrossEncoder(settings.reranker_model, device=device)
+            # max_length pinned explicitly to 8192. Why: most cross-encoders
+            # (including the older BGE v1 family and ms-marco-MiniLM) have a
+            # tokenizer.model_max_length of 512. bge-reranker-v2-m3 is the
+            # long-context variant ("m3" = multi-lingual, multi-functionality,
+            # multi-granularity) and supports 8192. If RERANKER_MODEL is ever
+            # swapped to a 512-token model, this pin makes the regression
+            # visible: either sentence-transformers will clamp + warn, or the
+            # tokenizer call will error — either way, no silent truncation.
+            _reranker = CrossEncoder(
+                settings.reranker_model,
+                device=device,
+                max_length=8192,
+            )
+            # Assert the loaded model actually supports the pinned length, so
+            # a future BAAI re-publish that quietly drops max_length to 512
+            # fails loud at startup instead of degrading retrieval silently.
+            assert _reranker.tokenizer.model_max_length >= 8192, (
+                f"Reranker {settings.reranker_model} has "
+                f"tokenizer.model_max_length={_reranker.tokenizer.model_max_length}, "
+                f"but we configured max_length=8192. The model is no longer "
+                f"long-context — pick a different reranker or lower the pin."
+            )
     return _reranker
 
 

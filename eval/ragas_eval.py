@@ -1256,11 +1256,9 @@ def main() -> int:
             )
             print(f"\n  Report written: {path.relative_to(PROJECT_ROOT)}")
         flush_traces()
-        # Strictest exit code: any failure in any run is a non-zero exit. A flaky
-    # case that passes 2 of 3 runs still counts as a failure for CI purposes —
-    # routing is supposed to be deterministic, and intermittent failure means
-    # something is wrong even if the "average" looks fine.
-    return 0 if all(r.passed for run in all_routing_results for r in run) else 1
+        # Early return: no answer cases means no RAGAS work to do. The
+        # final return at the bottom of main() handles the normal path.
+        return 0 if all(r.passed for run in all_routing_results for r in run) else 1
 
     # If every RAGAS run failed (LLMDidNotFinish, rate-limit, etc.), we still
     # want to write a routing-only report so the user can see what passed/

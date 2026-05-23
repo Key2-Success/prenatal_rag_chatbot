@@ -294,6 +294,15 @@ def _build_judge(judge_model: str) -> LangchainLLMWrapper:
     better to error before the (slow, expensive) RAGAS evaluation kicks off
     than to discover it three minutes in.
     """
+    # max_tokens=8192 explicitly. Default in langchain_anthropic is 1024,
+    # which causes RAGAS to throw LLMDidNotFinishException whenever the
+    # judge needs to emit a long structured response — most commonly during
+    # Faithfulness claim decomposition + verification for answers with
+    # many atomic claims (e.g. "iron 60mg + folic acid 500mcg + iron from
+    # 2nd trimester for 180 days + supplementation reduces anaemia + ..." ).
+    # Claude Sonnet 4.5 supports up to 64k output tokens; 8192 is comfortably
+    # above any realistic faithfulness verification while still capping cost
+    # if a runaway response somehow occurs.
     if judge_model.startswith("claude"):
         if not settings.anthropic_api_key:
             raise RuntimeError(
@@ -305,12 +314,14 @@ def _build_judge(judge_model: str) -> LangchainLLMWrapper:
             model=judge_model,
             temperature=0,
             api_key=settings.anthropic_api_key,
+            max_tokens=8192,
         )
     elif judge_model.startswith("gpt"):
         chat = ChatOpenAI(
             model=judge_model,
             temperature=0,
             api_key=settings.openai_api_key,
+            max_tokens=8192,
         )
     else:
         raise ValueError(
@@ -999,12 +1010,24 @@ def _execute_one_run(
         emit(f"Scoring {len(answer_cases)} answer case(s) "
              f"with RAGAS judge={judge_model} (max_workers={ragas_max_workers})...")
         emit("(Each case ≈ 3-9 judge LLM calls.)")
-        result = score_with_ragas(
-            answer_cases,
-            judge_model=judge_model,
-            max_workers=ragas_max_workers,
-        )
-        score_df = result.to_pandas()
+        # RAGAS scoring is wrapped in try/except specifically so a judge
+        # failure (LLMDidNotFinishException from max_tokens, JSON parse
+        # errors, rate-limit hits) doesn't take down the entire run and
+        # cost us the routing data we already computed. The report writer
+        # downstream is tolerant of score_df=None — it falls back to a
+        # routing-only report so the user can still see what passed.
+        try:
+            result = score_with_ragas(
+                answer_cases,
+                judge_model=judge_model,
+                max_workers=ragas_max_workers,
+            )
+            score_df = result.to_pandas()
+        except Exception as e:
+            emit(f"  ✗ RAGAS scoring FAILED: {type(e).__name__}: {e}")
+            emit(f"  → Routing data for this run is preserved; "
+                 f"per-case RAGAS scores will be missing from the report.")
+            score_df = None
 
     elapsed = time.perf_counter() - t0
     return routing_results, answer_cases, score_df, output_lines, elapsed
@@ -1116,6 +1139,18 @@ def main() -> int:
     all_routing_results: list[list[RoutingResult]] = [None] * args.runs  # filled by index
     per_run_answer_cases: list[list[AnswerCase] | None] = [None] * args.runs
 
+    # Pre-warm the self-hosted reranker in this thread BEFORE spawning any
+    # workers. The first reranker call on MPS triggers Metal-kernel
+    # compilation that takes 5-15 seconds; doing that here makes the cost
+    # visible (one message in the main thread) instead of having N parallel
+    # workers all race the cold path. Worker threads then share a fully-warm
+    # singleton and just call .predict() without re-compilation.
+    print("Pre-warming reranker (one-time load + MPS kernel compile)...")
+    warmup_t0 = time.perf_counter()
+    from backend.app.rag.retriever import warmup_reranker
+    warmup_reranker()
+    print(f"  → reranker ready ({time.perf_counter() - warmup_t0:.1f}s)\n")
+
     # Auto-divide RAGAS internal concurrency when parallelising runs, so the
     # total concurrent judge calls (N runs × per-run workers) stays within the
     # rate-limit budget the single-run config was sized for. Floor of 1 worker
@@ -1153,7 +1188,20 @@ def main() -> int:
             }
             for future in as_completed(future_to_idx):
                 run_idx = future_to_idx[future]
-                routing_results, answer_cases, score_df, output_lines, elapsed = future.result()
+                try:
+                    routing_results, answer_cases, score_df, output_lines, elapsed = future.result()
+                except Exception as e:
+                    # An unexpected exception escaped _execute_one_run (RAGAS
+                    # failures are already caught inside it, so this is more
+                    # likely a pipeline crash). Don't sink the whole eval —
+                    # other runs may have completed cleanly.
+                    print()
+                    print(f"┌─ RUN {run_idx + 1} of {args.runs} CRASHED ─┐")
+                    print(f"│  {type(e).__name__}: {e}")
+                    print(f"└──────────────────────────┘")
+                    all_routing_results[run_idx] = []
+                    per_run_answer_cases[run_idx] = []
+                    continue
 
                 all_routing_results[run_idx] = routing_results
                 per_run_answer_cases[run_idx] = answer_cases
@@ -1214,23 +1262,32 @@ def main() -> int:
     # something is wrong even if the "average" looks fine.
     return 0 if all(r.passed for run in all_routing_results for r in run) else 1
 
-    means_df, stds_df = _aggregate_score_dfs(all_score_dfs)
-    _print_ragas_aggregate(
-        means_df, stds_df,
-        n_cases=len(answer_cases),
-        n_runs=args.runs,
-        answer_cases=answer_cases,
-    )
+    # If every RAGAS run failed (LLMDidNotFinish, rate-limit, etc.), we still
+    # want to write a routing-only report so the user can see what passed/
+    # failed at the pipeline level. Skip the score aggregation + Langfuse
+    # attachment in that case but keep flowing to write_markdown_report.
+    if not all_score_dfs:
+        print("\n  ⚠ No RAGAS scores produced — every run's scoring failed.")
+        print("  → Writing a routing-only report with no answer-quality data.")
+        means_df, stds_df = None, None
+    else:
+        means_df, stds_df = _aggregate_score_dfs(all_score_dfs)
+        _print_ragas_aggregate(
+            means_df, stds_df,
+            n_cases=len(answer_cases),
+            n_runs=args.runs,
+            answer_cases=answer_cases,
+        )
 
-    if not args.no_langfuse_scores and settings.langfuse_enabled:
-        # Attach the AVERAGED scores to the run-1 traces (the only ones whose
-        # answer text is in the report). This gives a stable, comparable
-        # dashboard score per case without N duplicates per metric.
-        n = attach_scores_to_langfuse(answer_cases, means_df, judge_model=args.judge_model)
-        print(f"\n  Attached {n} averaged score(s) to Langfuse traces.")
-        print(f"  View session: https://cloud.langfuse.com/sessions/{run_id}")
-    elif not settings.langfuse_enabled:
-        print("\n  (Langfuse not configured — skipping score attachment.)")
+        if not args.no_langfuse_scores and settings.langfuse_enabled:
+            # Attach the AVERAGED scores to the run-1 traces (the only ones whose
+            # answer text is in the report). This gives a stable, comparable
+            # dashboard score per case without N duplicates per metric.
+            n = attach_scores_to_langfuse(answer_cases, means_df, judge_model=args.judge_model)
+            print(f"\n  Attached {n} averaged score(s) to Langfuse traces.")
+            print(f"  View session: https://cloud.langfuse.com/sessions/{run_id}")
+        elif not settings.langfuse_enabled:
+            print("\n  (Langfuse not configured — skipping score attachment.)")
 
     if not args.no_report:
         path = write_markdown_report(

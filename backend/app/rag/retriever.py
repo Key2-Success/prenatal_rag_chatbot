@@ -100,6 +100,40 @@ def _select_device() -> str:
     return "cpu"
 
 
+def warmup_reranker() -> None:
+    """
+    Load the cross-encoder AND trigger first-inference kernel compilation
+    in the calling thread, so multi-threaded callers don't all race the
+    cold-start path.
+
+    Why this exists: MPS (and to a lesser extent CUDA) compiles kernels
+    lazily on the first call with a given input shape. On Apple Silicon,
+    that first compilation takes 5-15 seconds — long enough that, with
+    `--parallel-runs`, multiple worker threads all try to do it
+    simultaneously and either deadlock or serialise into a long stall.
+    Calling this from the main thread BEFORE spawning workers means:
+      1. Model load (~30s) happens once, visibly, in main.
+      2. MPS kernel compilation happens once, in main, on a dummy input
+         with realistic shape (query + medium doc).
+      3. Worker threads then hit a fully-warm singleton — no cold path,
+         no kernel compilation, no contention on first-call.
+
+    Idempotent: if the singleton is already loaded, this just runs a
+    cheap dummy predict to keep semantics simple. The cost when already
+    warm is ~100ms.
+    """
+    import numpy as np
+    reranker = _get_reranker()
+    # Dummy pair with realistic-length text so the kernel that gets
+    # compiled is the same one used in production. Predict + sigmoid =
+    # the exact code path retrieve_and_rerank takes.
+    pairs = [("warmup query about pregnancy nutrition",
+              "Pregnant women should consume 60 mg of elemental iron and "
+              "500 mcg of folic acid daily from the second trimester.")]
+    raw = reranker.predict(pairs)
+    _ = 1.0 / (1.0 + np.exp(-np.asarray(raw)))  # exercise the sigmoid path too
+
+
 def _get_reranker():
     """
     Return the cached cross-encoder reranker, loading on first call.

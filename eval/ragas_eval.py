@@ -1174,6 +1174,15 @@ def main() -> int:
         # own progress lines into a buffer; we print each buffer as a single
         # block when the run completes (in completion order, not submit order)
         # so concurrent runs don't interleave their output into chaos.
+        #
+        # UX: print expectations BEFORE workers go silent. Without this, the
+        # user sees only the "Parallel mode:" banner and several minutes of
+        # silence, which reads as a hang. Per-run output appears as a single
+        # block only when that run completes — so 3-5 min of nothing is
+        # normal and expected.
+        print(f"⏳ Workers launched. Output appears as each run completes "
+              f"(each run takes ~3-5 minutes; no progress shown during run). "
+              f"Watching {args.runs} concurrent runs...")
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         with ThreadPoolExecutor(max_workers=args.runs) as pool:

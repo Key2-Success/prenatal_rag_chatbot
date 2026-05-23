@@ -63,19 +63,42 @@ if settings.langfuse_enabled:
     _client = get_client()
 
     def observe(name: str | None = None, as_type: str | None = None) -> Callable:
-        """Forward to langfuse.observe — only pass kwargs that were explicitly set.
+        """Decorator that creates a named Langfuse span around a function.
 
-        Passing `as_type=None` (or any None default) to Langfuse's `observe`
-        confuses the SDK's introspection — it can fail to nest spans under
-        the active OTel context. Forwarding only what the caller specified
-        keeps the SDK on its documented happy path.
+        Implementation uses `client.start_as_current_observation(name=...)`
+        directly rather than the SDK's `@observe` because in Langfuse v4.6.x,
+        `@observe(name="x")` silently drops the name attribute — observations
+        come back with name=None, the UI shows blank/unlabelled spans, and
+        the trace tree view becomes unreadable. Verified by direct API
+        query against our Langfuse instance (May 2026). The lower-level
+        `start_as_current_observation` accepts name as a REQUIRED kwarg
+        and stores it correctly on the OTel span.
+
+        Tradeoff: we lose @observe's auto-capture of function inputs/outputs.
+        That's fine for this project — every instrumented function already
+        calls update_current_span(input=..., output=...) explicitly, which
+        is the recommended pattern anyway (the auto-capture would dump full
+        ChatRequest objects including the user profile into the trace input,
+        whereas the explicit calls trim to just the relevant fields).
         """
-        kwargs: dict[str, Any] = {}
-        if name is not None:
-            kwargs["name"] = name
-        if as_type is not None:
-            kwargs["as_type"] = as_type
-        return _observe(**kwargs)
+        from functools import wraps
+
+        obs_type = as_type or "span"
+
+        def decorator(fn: Callable) -> Callable:
+            @wraps(fn)
+            def wrapped(*args: Any, **kw: Any) -> Any:
+                # Fall back to function name if no explicit name given.
+                # Matches @observe's default behaviour for that case.
+                span_name = name or fn.__name__
+                with _client.start_as_current_observation(
+                    name=span_name,
+                    as_type=obs_type,
+                ):
+                    return fn(*args, **kw)
+            return wrapped
+
+        return decorator
 
     def update_current_span(**kwargs: Any) -> None:
         """Forward to langfuse.update_current_span on the active observation."""

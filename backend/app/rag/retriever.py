@@ -323,9 +323,19 @@ def retrieve_and_rerank(query: str) -> list[RetrievedChunk]:
     # order; we sigmoid-normalise to a 0-1 score so the numbers in eval
     # reports and Langfuse traces are comparable to the previous
     # Pinecone-Inference-hosted output of the same model.
+    #
+    # Lock around .predict() because PyTorch MPS (Apple Silicon Metal) is
+    # NOT reliably thread-safe under concurrent model forward passes — it
+    # can deadlock or stall when multiple threads call .predict() on the
+    # same model instance. The lock serialises just the GPU call, not the
+    # surrounding pipeline, so OpenAI API calls (embedding, classifier,
+    # answer LLM) and Pinecone queries still parallelise normally with
+    # --parallel-runs. Reranker work is ~13s of a ~5min eval, so this
+    # serialisation costs little but prevents hangs.
     reranker = _get_reranker()
     pairs = [(query, c.text) for c in all_candidates]
-    raw_scores = reranker.predict(pairs)
+    with _reranker_lock:
+        raw_scores = reranker.predict(pairs)
     scores = 1.0 / (1.0 + np.exp(-np.asarray(raw_scores)))  # sigmoid
 
     # Pick the top_k candidates by reranker score. The returned indices point

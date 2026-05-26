@@ -92,15 +92,18 @@ def _evaluate(case: TestCase, response, elapsed: float) -> CaseResult:
             f"got {actual_type.value}"
         )
     # Citation check fires only on answer-behavior cases (the schema guarantees
-    # cites_org is None for non-answer cases).
-    if (
-        case.expected.cites_org
-        and actual_type is ResponseType.answer
-        and actual_org != case.expected.cites_org
-    ):
-        failures.append(
-            f"cites_org: expected {case.expected.cites_org}, got {actual_org}"
-        )
+    # both cites_org and cites_org_one_of are None for non-answer cases).
+    # Schema also enforces mutual exclusion — at most one is set.
+    if actual_type is ResponseType.answer:
+        if case.expected.cites_org and actual_org != case.expected.cites_org:
+            failures.append(
+                f"cites_org: expected {case.expected.cites_org}, got {actual_org}"
+            )
+        elif case.expected.cites_org_one_of and actual_org not in case.expected.cites_org_one_of:
+            failures.append(
+                f"cites_org_one_of: expected one of {case.expected.cites_org_one_of}, "
+                f"got {actual_org}"
+            )
 
     return CaseResult(
         case=case,

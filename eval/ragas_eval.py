@@ -230,14 +230,18 @@ def run_and_capture(
             f"behavior: expected {case.expected.behavior.value}, "
             f"got {actual_type.value}"
         )
-    if (
-        case.expected.cites_org
-        and actual_type is ResponseType.answer
-        and actual_org != case.expected.cites_org
-    ):
-        failures.append(
-            f"cites_org: expected {case.expected.cites_org}, got {actual_org}"
-        )
+    # Schema enforces cites_org and cites_org_one_of are mutually exclusive
+    # and that both require behavior=answer, so only one branch will fire.
+    if actual_type is ResponseType.answer:
+        if case.expected.cites_org and actual_org != case.expected.cites_org:
+            failures.append(
+                f"cites_org: expected {case.expected.cites_org}, got {actual_org}"
+            )
+        elif case.expected.cites_org_one_of and actual_org not in case.expected.cites_org_one_of:
+            failures.append(
+                f"cites_org_one_of: expected one of {case.expected.cites_org_one_of}, "
+                f"got {actual_org}"
+            )
 
     routing = RoutingResult(
         case=case,
@@ -840,7 +844,15 @@ def _markdown_report(
         else:
             status = "PASS" if r.passed else "FAIL"
         actual = r.actual_type.value if r.actual_type else "—"
-        cites = f"{r.case.expected.cites_org or '—'} → {r.actual_org or '—'}"
+        # Render expected source(s) — strict cites_org, permissive
+        # cites_org_one_of, or em-dash when no citation assertion exists.
+        if r.case.expected.cites_org:
+            expected_cites = r.case.expected.cites_org
+        elif r.case.expected.cites_org_one_of:
+            expected_cites = "/".join(r.case.expected.cites_org_one_of)
+        else:
+            expected_cites = "—"
+        cites = f"{expected_cites} → {r.actual_org or '—'}"
         lines.append(
             f"| {r.case.id} | {r.case.category.value} | {status} "
             f"| {r.case.expected.behavior.value} | {actual} "

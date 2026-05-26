@@ -13,9 +13,15 @@
 #   query         — the user message
 #   profile       — key from user_profiles.yaml
 #   expected:
-#     behavior    — answer | emergency | out_of_scope | no_results
-#     cites_org   — (optional, behavior=answer only) MoHFW | FOGSI | WHO
-#                   Asserts the priority-ordered retriever picked the right source.
+#     behavior          — answer | emergency | out_of_scope | no_results
+#     cites_org         — (optional, behavior=answer only) MoHFW | FOGSI | WHO
+#                         Strict: asserts the FIRST cited org matches exactly.
+#                         Use when the question is ONLY answerable from one source.
+#     cites_org_one_of  — (optional, behavior=answer only) list of orgs
+#                         Permissive: asserts the first cited org is in the list.
+#                         Use when multiple authoritative sources contain the same
+#                         correct info (e.g. iron dosing is in all three sources).
+#                         Mutually exclusive with cites_org — schema enforces.
 
 # ---------- A. Core nutrition (5) ----------
 # Common questions clearly covered by the PDFs. Baseline that retrieval works.
@@ -26,7 +32,8 @@
   profile: priya
   expected:
     behavior: answer
-    cites_org: MoHFW
+    # Universal dosing — all 3 sources state 100 mg from 2nd trimester.
+    cites_org_one_of: [MoHFW, FOGSI, WHO]
 
 - id: folic_acid_sources
   category: core_nutrition
@@ -34,7 +41,8 @@
   profile: sunita
   expected:
     behavior: answer
-    cites_org: MoHFW
+    # Folate food lists are universal in antenatal guidance.
+    cites_org_one_of: [MoHFW, FOGSI, WHO]
 
 - id: calcium_intake
   category: core_nutrition
@@ -42,7 +50,8 @@
   profile: priya
   expected:
     behavior: answer
-    cites_org: MoHFW
+    # Calcium dosing universal across MoHFW / FOGSI / WHO guidance.
+    cites_org_one_of: [MoHFW, FOGSI, WHO]
 
 - id: weight_gain_normal
   category: core_nutrition
@@ -50,7 +59,8 @@
   profile: anjali
   expected:
     behavior: answer
-    cites_org: MoHFW
+    # WHO/IOM weight gain ranges are adopted by MoHFW and FOGSI verbatim.
+    cites_org_one_of: [MoHFW, FOGSI, WHO]
 
 - id: water_intake
   category: core_nutrition
@@ -122,7 +132,8 @@
   profile: priya            # has low iron — realistic context for the question
   expected:
     behavior: answer
-    cites_org: MoHFW
+    # India-specific food — Indian sources only; WHO doesn't cover jaggery.
+    cites_org_one_of: [MoHFW, FOGSI]
 
 - id: paneer_intake
   category: indian_context
@@ -130,7 +141,8 @@
   profile: priya            # vegetarian — paneer is a key protein source
   expected:
     behavior: answer
-    cites_org: MoHFW
+    # India-specific dairy — Indian sources only; WHO doesn't cover paneer.
+    cites_org_one_of: [MoHFW, FOGSI]
 
 - id: amla_pregnancy
   category: indian_context
@@ -138,7 +150,8 @@
   profile: sunita
   expected:
     behavior: answer
-    cites_org: MoHFW
+    # India-specific fruit (Indian gooseberry) — Indian sources only.
+    cites_org_one_of: [MoHFW, FOGSI]
 
 # ---------- D. Guardrails — emergencies (4) ----------
 # Should NEVER call the LLM. Should return EMERGENCY_RESPONSE.

@@ -51,28 +51,67 @@ class Category(str, Enum):
 
 
 class ExpectedOutcome(BaseModel):
-    """The `expected:` block on each test case."""
+    """The `expected:` block on each test case.
+
+    Two mutually-exclusive citation assertions are supported:
+      - `cites_org: MoHFW` — strict: the FIRST cited org must be MoHFW.
+        Use only when the question is genuinely only answerable from one
+        source (e.g. India-only scheme details), OR when explicitly
+        testing source-priority logic.
+      - `cites_org_one_of: [MoHFW, FOGSI]` — permissive: the first cited
+        org must be one of the listed orgs. Use for questions where
+        multiple authoritative sources contain the same correct
+        information (e.g. iron dosing — all three of WHO/MoHFW/FOGSI
+        state 100 mg from 2nd trimester).
+
+    Why two assertion types: the strict version was originally used
+    everywhere and conflated "answered correctly" with "answered from
+    the politically preferred source." After re-ingestion (e.g. parser
+    swap) the reranker can legitimately rank a different correct source
+    first, breaking strict assertions even when answer quality is fine.
+    The permissive form lets the test check what actually matters —
+    that an authoritative source was cited.
+    """
     behavior: ResponseType
     cites_org: str | None = None
+    cites_org_one_of: list[str] | None = None
 
     @model_validator(mode="after")
-    def _validate_cites_org(self) -> "ExpectedOutcome":
+    def _validate_citation_assertions(self) -> "ExpectedOutcome":
         # Asserting a citation only makes sense when an answer was produced.
         # Emergencies and out-of-scope responses don't carry sources.
-        if self.cites_org is None:
+        if self.cites_org is None and self.cites_org_one_of is None:
             return self
         if self.behavior is not ResponseType.answer:
             raise ValueError(
-                f"cites_org is only valid when behavior=answer "
+                f"cites_org / cites_org_one_of are only valid when behavior=answer "
                 f"(got behavior={self.behavior.value})"
+            )
+        # Mutually exclusive — if both were allowed, run_eval would need
+        # priority rules, which would mask test-author intent. Force the
+        # author to choose ONE assertion style per case.
+        if self.cites_org is not None and self.cites_org_one_of is not None:
+            raise ValueError(
+                f"cites_org and cites_org_one_of are mutually exclusive — "
+                f"choose one. Got cites_org={self.cites_org!r}, "
+                f"cites_org_one_of={self.cites_org_one_of!r}"
             )
         # Pull valid orgs from sources.json — single source of truth. Adding
         # a new PDF in data/sources.json automatically expands the allowed set.
         valid_orgs = priority_order()
-        if self.cites_org not in valid_orgs:
+        if self.cites_org is not None and self.cites_org not in valid_orgs:
             raise ValueError(
                 f"cites_org must be one of {list(valid_orgs)}, got {self.cites_org!r}"
             )
+        if self.cites_org_one_of is not None:
+            if not self.cites_org_one_of:
+                raise ValueError("cites_org_one_of must be non-empty")
+            invalid = [o for o in self.cites_org_one_of if o not in valid_orgs]
+            if invalid:
+                raise ValueError(
+                    f"cites_org_one_of contains unknown orgs: {invalid}. "
+                    f"Valid: {list(valid_orgs)}"
+                )
         return self
 
 

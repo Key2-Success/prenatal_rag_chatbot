@@ -6,7 +6,8 @@ Two complementary layers in one report:
   Layer 1 — Routing (all 26 cases):
     Did the pipeline send each message to the right destination?
     Asserts: response_type matches expected.behavior, and (for answer cases)
-    first cited org matches expected.cites_org.
+    the priority-honored rule (first cited org == highest-priority source
+    present in retrieved chunks, per data/sources.json) is satisfied.
 
   Layer 2 — Answer quality (the ~17 answer-producing cases only):
     Given that an answer was produced, was it any good?
@@ -137,6 +138,9 @@ class RoutingResult:
 
     Mirrors run_eval.py's CaseResult so the routing section of this report
     is identical in structure and can be compared directly.
+
+    Priority-honored fields (sources_in_chunks, expected_top_priority,
+    priority_honored) are populated on answer cases only — None otherwise.
     """
     case: TestCase
     passed: bool
@@ -145,6 +149,9 @@ class RoutingResult:
     actual_type: ResponseType | None
     actual_org: str | None
     answer_preview: str | None  # first _PREVIEW_CHARS of the actual response
+    sources_in_chunks: list[str] | None = None
+    expected_top_priority: str | None = None
+    priority_honored: bool | None = None
 
 
 @dataclass
@@ -230,17 +237,29 @@ def run_and_capture(
             f"behavior: expected {case.expected.behavior.value}, "
             f"got {actual_type.value}"
         )
-    # Schema enforces cites_org and cites_org_one_of are mutually exclusive
-    # and that both require behavior=answer, so only one branch will fire.
-    if actual_type is ResponseType.answer:
-        if case.expected.cites_org and actual_org != case.expected.cites_org:
+
+    # Universal priority-honored check on answer cases. The priority order
+    # is global (sources.json), so the assertion is global too. No per-case
+    # cites_org config needed — the test asserts "for this answer, was the
+    # first cited org the highest-priority org PRESENT in the chunks?"
+    sources_in_chunks: list[str] | None = None
+    expected_top: str | None = None
+    priority_honored: bool | None = None
+    if actual_type is ResponseType.answer and response.sources:
+        sources_in_chunks = []
+        for s in response.sources:
+            if s.org_display_name not in sources_in_chunks:
+                sources_in_chunks.append(s.org_display_name)
+        for org in priority_order():
+            if org in sources_in_chunks:
+                expected_top = org
+                break
+        priority_honored = actual_org == expected_top
+        if priority_honored is False:
             failures.append(
-                f"cites_org: expected {case.expected.cites_org}, got {actual_org}"
-            )
-        elif case.expected.cites_org_one_of and actual_org not in case.expected.cites_org_one_of:
-            failures.append(
-                f"cites_org_one_of: expected one of {case.expected.cites_org_one_of}, "
-                f"got {actual_org}"
+                f"priority not honored: chunks contained {sources_in_chunks}, "
+                f"expected first cited org to be {expected_top} (highest "
+                f"priority present), got {actual_org}"
             )
 
     routing = RoutingResult(
@@ -251,6 +270,9 @@ def run_and_capture(
         actual_type=actual_type,
         actual_org=actual_org,
         answer_preview=preview,
+        sources_in_chunks=sources_in_chunks,
+        expected_top_priority=expected_top,
+        priority_honored=priority_honored,
     )
 
     # --- RAGAS capture (answer cases only) ---
@@ -756,7 +778,9 @@ def _markdown_report(
         lines += [
             f"**{n_routing_passed}/{n_total} passed ({routing_pass_rate:.0f}%)** "
             "across all cases. Checks `response_type` matches expected behavior, "
-            "and (for answer cases) the first cited source matches `cites_org`.",
+            "and (for answer cases) the first cited source is the highest-priority "
+            "source present in the retrieved chunks (priority order from "
+            "`data/sources.json`).",
             "",
         ]
 
@@ -821,11 +845,37 @@ def _markdown_report(
                 )
         lines.append("")
 
+    # ── Priority-honored mini-summary (answer cases only) ────────────────────
+    # Split by single-source-retrieved (trivially honored) vs multi-source-
+    # retrieved (where priority logic actually has a choice to make). The
+    # split matters: a regression in priority sorting will show up in the
+    # multi-source bucket; the single-source bucket is informational.
+    answer_routing = [r for r in routing_results if r.priority_honored is not None]
+    n_answer = len(answer_routing)
+    if n_answer > 0:
+        multi = [r for r in answer_routing if r.sources_in_chunks and len(r.sources_in_chunks) > 1]
+        single = [r for r in answer_routing if r.sources_in_chunks and len(r.sources_in_chunks) == 1]
+        honored_total = sum(1 for r in answer_routing if r.priority_honored)
+        honored_multi = sum(1 for r in multi if r.priority_honored)
+        lines += [
+            "### Priority ordering",
+            "",
+            "For each answer case, the runner asserts: **the first cited org "
+            "must be the highest-priority source PRESENT in the retrieved "
+            "chunks** (priority order from `data/sources.json`).",
+            "",
+            f"- **{honored_total}/{n_answer}** answer cases honored priority overall",
+            f"  - Multi-source retrieval (priority logic had a real choice): "
+            f"**{honored_multi}/{len(multi)}** honored",
+            f"  - Single-source retrieval (trivially honored): {len(single)}/{len(single)}",
+            "",
+        ]
+
     # ── Section 1: Routing breakdown ─────────────────────────────────────────
     multi_run_note = (
         f" The Pass column shows runs-passed-out-of-{n_runs}; "
         f"anything other than {n_runs}/{n_runs} is non-deterministic and "
-        "needs investigation. Other columns (Actual, Cites, Time) are from run 1."
+        "needs investigation. Other columns (Actual, Priority, Time) are from run 1."
     ) if n_runs > 1 else ""
     pass_header = f"Pass ({n_runs} runs)" if n_runs > 1 else "Status"
     lines += [
@@ -834,7 +884,7 @@ def _markdown_report(
         "Per-case detail for all cases — useful when a category in the summary "
         f"above is below 100% and you need to find the failing case quickly.{multi_run_note}",
         "",
-        f"| ID | Category | {pass_header} | Expected | Actual | Cites (exp → got) | Time | Reason |",
+        f"| ID | Category | {pass_header} | Expected | Actual | Priority | Time | Reason |",
         "|---|---|---|---|---|---|---|---|",
     ]
     for r in routing_results:
@@ -844,19 +894,27 @@ def _markdown_report(
         else:
             status = "PASS" if r.passed else "FAIL"
         actual = r.actual_type.value if r.actual_type else "—"
-        # Render expected source(s) — strict cites_org, permissive
-        # cites_org_one_of, or em-dash when no citation assertion exists.
-        if r.case.expected.cites_org:
-            expected_cites = r.case.expected.cites_org
-        elif r.case.expected.cites_org_one_of:
-            expected_cites = "/".join(r.case.expected.cites_org_one_of)
+        # Render priority status — only meaningful on answer cases.
+        if r.priority_honored is None:
+            priority_cell = "—"
+        elif r.priority_honored:
+            # If MoHFW was present and won, show "MoHFW✓".
+            # If MoHFW wasn't present and FOGSI won, show "MoHFW absent → FOGSI ✓".
+            present = r.sources_in_chunks or []
+            top_priority_overall = priority_order()[0]
+            if r.expected_top_priority == top_priority_overall:
+                priority_cell = f"{r.expected_top_priority}✓"
+            else:
+                priority_cell = f"{top_priority_overall} absent → {r.expected_top_priority}✓"
         else:
-            expected_cites = "—"
-        cites = f"{expected_cites} → {r.actual_org or '—'}"
+            priority_cell = (
+                f"expected {r.expected_top_priority}, "
+                f"got {r.actual_org}"
+            )
         lines.append(
             f"| {r.case.id} | {r.case.category.value} | {status} "
             f"| {r.case.expected.behavior.value} | {actual} "
-            f"| {cites} | {r.elapsed_s:.2f}s | {r.reason} |"
+            f"| {priority_cell} | {r.elapsed_s:.2f}s | {r.reason} |"
         )
     lines.append("")
 

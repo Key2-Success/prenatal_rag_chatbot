@@ -5,8 +5,11 @@ Loads `user_profiles.yaml` and `test_cases.yaml`, validates them through
 the schemas in `eval/schemas.py`, runs each case through the real
 `run_chat()` pipeline (Pinecone retrieval + OpenAI LLM), and asserts:
 
-  1. behavior  — answer | emergency | out_of_scope | no_results
-  2. cites_org — (optional, behavior=answer only) first source's org
+  1. behavior          — answer | emergency | out_of_scope | no_results
+  2. priority honored  — (answer cases only) the first cited source must
+                         be the highest-priority source PRESENT in the
+                         response.sources list. Priority order is the
+                         global one defined in data/sources.json.
 
 Prints per-case PASS/FAIL inline, a per-category summary at the end, and
 writes a timestamped markdown report to `eval/results/`.
@@ -39,6 +42,7 @@ from backend.app.chat.pipeline import run_chat
 from backend.app.config import PROJECT_ROOT
 from backend.app.models.schemas import ChatRequest, ResponseType
 from backend.app.observability import flush as flush_traces
+from backend.app.sources import priority_order
 from eval.schemas import EvalSuite, TestCase
 
 EVAL_DIR = PROJECT_ROOT / "eval"
@@ -78,6 +82,45 @@ class CaseResult:
     actual_type: ResponseType | None
     actual_org: str | None
     answer_preview: str | None
+    # Priority-honored fields — populated for answer cases only.
+    sources_in_chunks: list[str] | None = None  # unique orgs present, in chunk order
+    expected_top_priority: str | None = None    # highest-priority org present
+    priority_honored: bool | None = None        # actual_org == expected_top_priority
+
+
+def _check_priority_honored(
+    response,
+) -> tuple[list[str], str | None, bool] | tuple[None, None, None]:
+    """
+    For answer cases: derive (sources_in_chunks, expected_top_priority, honored).
+
+    Returns (None, None, None) for non-answer responses or when no chunks
+    were cited (priority check is vacuous in those cases).
+
+    The check itself is straightforward: of the source orgs present in
+    response.sources, find the one with the highest priority per the global
+    priority_order() — that's the org that SHOULD have been cited first.
+    Compare to the actual first-cited org.
+
+    Why use response.sources (vs. internal capture): response.sources is
+    the user-visible citation list. The test asserts user-facing behavior,
+    not internal pipeline state. The two are equivalent here, but this
+    framing is the right one for portfolio narrative.
+    """
+    if not response.sources:
+        return None, None, None
+    sources_in_chunks: list[str] = []
+    for s in response.sources:
+        if s.org_display_name not in sources_in_chunks:
+            sources_in_chunks.append(s.org_display_name)
+    # Highest-priority org present, walking the global priority order.
+    expected_top: str | None = None
+    for org in priority_order():
+        if org in sources_in_chunks:
+            expected_top = org
+            break
+    actual_first = response.sources[0].org_display_name
+    return sources_in_chunks, expected_top, actual_first == expected_top
 
 
 def _evaluate(case: TestCase, response, elapsed: float) -> CaseResult:
@@ -91,18 +134,20 @@ def _evaluate(case: TestCase, response, elapsed: float) -> CaseResult:
             f"behavior: expected {case.expected.behavior.value}, "
             f"got {actual_type.value}"
         )
-    # Citation check fires only on answer-behavior cases (the schema guarantees
-    # both cites_org and cites_org_one_of are None for non-answer cases).
-    # Schema also enforces mutual exclusion — at most one is set.
+
+    # Universal priority-honored check on answer cases. The schema no
+    # longer carries per-case cites_org assertions — the priority order
+    # is global config, so the check is global too.
+    sources_in_chunks: list[str] | None = None
+    expected_top: str | None = None
+    priority_honored: bool | None = None
     if actual_type is ResponseType.answer:
-        if case.expected.cites_org and actual_org != case.expected.cites_org:
+        sources_in_chunks, expected_top, priority_honored = _check_priority_honored(response)
+        if priority_honored is False:
             failures.append(
-                f"cites_org: expected {case.expected.cites_org}, got {actual_org}"
-            )
-        elif case.expected.cites_org_one_of and actual_org not in case.expected.cites_org_one_of:
-            failures.append(
-                f"cites_org_one_of: expected one of {case.expected.cites_org_one_of}, "
-                f"got {actual_org}"
+                f"priority not honored: chunks contained {sources_in_chunks}, "
+                f"expected first cited org to be {expected_top} (highest priority "
+                f"present), got {actual_org}"
             )
 
     return CaseResult(
@@ -113,6 +158,9 @@ def _evaluate(case: TestCase, response, elapsed: float) -> CaseResult:
         actual_type=actual_type,
         actual_org=actual_org,
         answer_preview=response.answer[:_PREVIEW_CHARS].replace("\n", " "),
+        sources_in_chunks=sources_in_chunks,
+        expected_top_priority=expected_top,
+        priority_honored=priority_honored,
     )
 
 
@@ -205,17 +253,29 @@ def _report_lines(results: list[CaseResult], note: str | None, timestamp: str) -
     lines += [
         "## Cases",
         "",
-        "| ID | Category | Status | Expected | Actual | Cites (exp → got) | Time | Reason |",
+        "| ID | Category | Status | Expected | Actual | Priority | Time | Reason |",
         "|---|---|---|---|---|---|---|---|",
     ]
+    top_priority_overall = priority_order()[0]
     for r in results:
         status = "PASS" if r.passed else "FAIL"
         actual = r.actual_type.value if r.actual_type else "—"
-        cites = f"{r.case.expected.cites_org or '—'} → {r.actual_org or '—'}"
+        # Render priority status. None for non-answer cases (no chunks to
+        # check). Pass shows the highest-priority org that was actually
+        # cited; fail shows the mismatch.
+        if r.priority_honored is None:
+            priority_cell = "—"
+        elif r.priority_honored:
+            if r.expected_top_priority == top_priority_overall:
+                priority_cell = f"{r.expected_top_priority}✓"
+            else:
+                priority_cell = f"{top_priority_overall} absent → {r.expected_top_priority}✓"
+        else:
+            priority_cell = f"expected {r.expected_top_priority}, got {r.actual_org}"
         lines.append(
             f"| {r.case.id} | {r.case.category.value} | {status} "
             f"| {r.case.expected.behavior.value} | {actual} "
-            f"| {cites} | {r.elapsed_s:.2f}s | {r.reason} |"
+            f"| {priority_cell} | {r.elapsed_s:.2f}s | {r.reason} |"
         )
     lines.append("")
 

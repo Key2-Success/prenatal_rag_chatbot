@@ -6,7 +6,7 @@ Why schemas (not raw dicts):
   models gives us, at load time:
     - typo detection with line-level error messages
     - enum-constrained fields (no string-typing for behavior, category, etc.)
-    - cross-field validation (cites_org only valid when behavior=answer)
+    - cross-field validation (e.g. behavior values constrained by ResponseType)
     - cross-document validation (every case.profile exists, no duplicate ids)
     - one source of truth: valid orgs come from sources.json, not a hardcode
 
@@ -23,7 +23,6 @@ from enum import Enum
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from backend.app.models.schemas import ResponseType, UserProfile
-from backend.app.sources import priority_order
 
 
 class StrictUserProfile(UserProfile):
@@ -53,66 +52,23 @@ class Category(str, Enum):
 class ExpectedOutcome(BaseModel):
     """The `expected:` block on each test case.
 
-    Two mutually-exclusive citation assertions are supported:
-      - `cites_org: MoHFW` — strict: the FIRST cited org must be MoHFW.
-        Use only when the question is genuinely only answerable from one
-        source (e.g. India-only scheme details), OR when explicitly
-        testing source-priority logic.
-      - `cites_org_one_of: [MoHFW, FOGSI]` — permissive: the first cited
-        org must be one of the listed orgs. Use for questions where
-        multiple authoritative sources contain the same correct
-        information (e.g. iron dosing — all three of WHO/MoHFW/FOGSI
-        state 100 mg from 2nd trimester).
+    Only `behavior` is asserted here. Citation correctness is checked
+    universally by the runner via the priority-honored rule:
 
-    Why two assertion types: the strict version was originally used
-    everywhere and conflated "answered correctly" with "answered from
-    the politically preferred source." After re-ingestion (e.g. parser
-    swap) the reranker can legitimately rank a different correct source
-    first, breaking strict assertions even when answer quality is fine.
-    The permissive form lets the test check what actually matters —
-    that an authoritative source was cited.
+      For every answer case, the first cited source must be the
+      highest-priority source PRESENT in the retrieved chunks (priority
+      order defined in data/sources.json).
+
+    Why no per-case citation assertion: the old `cites_org` / `cites_org_one_of`
+    fields conflated "answered correctly" with "answered from the
+    politically preferred source." Strict assertions (`MoHFW`) broke when
+    a different source legitimately ranked first; permissive lists with
+    all 3 sources were vacuous (trivially equivalent to behavior=answer).
+    The universal priority-honored rule tests the actual property we care
+    about (does priority sorting work?) without per-case judgment, since
+    priority order is global config in sources.json.
     """
     behavior: ResponseType
-    cites_org: str | None = None
-    cites_org_one_of: list[str] | None = None
-
-    @model_validator(mode="after")
-    def _validate_citation_assertions(self) -> "ExpectedOutcome":
-        # Asserting a citation only makes sense when an answer was produced.
-        # Emergencies and out-of-scope responses don't carry sources.
-        if self.cites_org is None and self.cites_org_one_of is None:
-            return self
-        if self.behavior is not ResponseType.answer:
-            raise ValueError(
-                f"cites_org / cites_org_one_of are only valid when behavior=answer "
-                f"(got behavior={self.behavior.value})"
-            )
-        # Mutually exclusive — if both were allowed, run_eval would need
-        # priority rules, which would mask test-author intent. Force the
-        # author to choose ONE assertion style per case.
-        if self.cites_org is not None and self.cites_org_one_of is not None:
-            raise ValueError(
-                f"cites_org and cites_org_one_of are mutually exclusive — "
-                f"choose one. Got cites_org={self.cites_org!r}, "
-                f"cites_org_one_of={self.cites_org_one_of!r}"
-            )
-        # Pull valid orgs from sources.json — single source of truth. Adding
-        # a new PDF in data/sources.json automatically expands the allowed set.
-        valid_orgs = priority_order()
-        if self.cites_org is not None and self.cites_org not in valid_orgs:
-            raise ValueError(
-                f"cites_org must be one of {list(valid_orgs)}, got {self.cites_org!r}"
-            )
-        if self.cites_org_one_of is not None:
-            if not self.cites_org_one_of:
-                raise ValueError("cites_org_one_of must be non-empty")
-            invalid = [o for o in self.cites_org_one_of if o not in valid_orgs]
-            if invalid:
-                raise ValueError(
-                    f"cites_org_one_of contains unknown orgs: {invalid}. "
-                    f"Valid: {list(valid_orgs)}"
-                )
-        return self
 
 
 class TestCase(BaseModel):

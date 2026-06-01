@@ -705,12 +705,21 @@ def _markdown_report(
     avg_pass_rate = (avg_passed / n_total * 100) if n_total else 0.0
 
     runs_note = f"  **Runs:** {n_runs}" if n_runs > 1 else ""
+    # HyDE mode in the header so two reports (--hyde and --no-hyde) can be
+    # diffed at a glance. Also pulls in the prompt version so we can tie
+    # results to the exact hypothetical-answer template used.
+    hyde_note = ""
+    if settings.hyde_enabled:
+        from backend.app.rag.hyde import PROMPT_VERSION as HYDE_PROMPT_VERSION
+        hyde_note = f"  **HyDE:** ON ({settings.hyde_model}, prompt {HYDE_PROMPT_VERSION})"
+    else:
+        hyde_note = "  **HyDE:** OFF (raw query embedding)"
     lines: list[str] = [
         f"# Poshan Saathi — Eval {timestamp}",
         "",
         f"**Wall-clock total:** {overall_elapsed_s:.1f}s "
         f"(pipeline + RAGAS scoring across all {n_runs} run{'s' if n_runs > 1 else ''})  "
-        f"**Judge model:** `{judge_model}` (temperature 0){runs_note}",
+        f"**Judge model:** `{judge_model}` (temperature 0){runs_note}{hyde_note}",
         "",
     ]
 
@@ -1161,6 +1170,19 @@ def main() -> int:
         "-m", "--note",
         help="Short message about what changed since the last run, embedded in the report",
     )
+    # HyDE override flags — mutually exclusive. Default (neither set) inherits
+    # from settings.hyde_enabled. --hyde forces ON for this run, --no-hyde
+    # forces OFF. Use for A/B comparison: run with --hyde and again with
+    # --no-hyde, diff the two report files.
+    hyde_group = parser.add_mutually_exclusive_group()
+    hyde_group.add_argument(
+        "--hyde", dest="hyde_override", action="store_true", default=None,
+        help="Force HyDE ON for this run (overrides HYDE_ENABLED env)",
+    )
+    hyde_group.add_argument(
+        "--no-hyde", dest="hyde_override", action="store_false",
+        help="Force HyDE OFF for this run (overrides HYDE_ENABLED env)",
+    )
     args = parser.parse_args()
 
     if args.runs < 1:
@@ -1170,6 +1192,14 @@ def main() -> int:
     if args.parallel_runs and args.runs == 1:
         print("--parallel-runs has no effect with --runs 1; ignoring.")
         args.parallel_runs = False
+
+    # Apply HyDE override BEFORE any pipeline call. settings is a pydantic-
+    # settings instance; mutation here just shadows the env-loaded default
+    # for the duration of this process. The retriever reads
+    # settings.hyde_enabled at call time, so this works.
+    if args.hyde_override is not None:
+        settings.hyde_enabled = args.hyde_override
+        print(f"HyDE forced {'ON' if args.hyde_override else 'OFF'} via CLI flag.")
 
     try:
         suite = load_suite()

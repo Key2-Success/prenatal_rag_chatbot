@@ -278,18 +278,28 @@ def _dedup_by_text(chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
 
 
 @observe(name="retrieve_and_rerank")
-def retrieve_and_rerank(query: str) -> list[RetrievedChunk]:
+def retrieve_and_rerank(query: str, profile=None) -> list[RetrievedChunk]:
     """
     Two-stage retrieval: recall from all sources, then cross-encoder rerank.
+
+    Stage 0 — Query embedding (with optional HyDE transformation):
+      If settings.hyde_enabled is True AND a profile was passed in, run
+      HyDE: a small LLM generates a hypothetical answer to the query
+      (personalised by profile), and we embed THAT answer instead of the
+      raw query. The hypothetical answer is in the same prose register as
+      the answer chunks, which substantially improves embedding match for
+      natural-language queries. See backend/app/rag/hyde.py for details.
+      Falls back to raw-query embedding when HyDE is disabled or profile
+      is None (e.g. internal callers that don't have profile context).
 
     Stage 1 — Recall:
       Query all sources simultaneously. Pool and deduplicate by text content.
       Every source gets a fair shot at the reranker — no hard waterfall.
 
     Stage 2 — Rerank:
-      Pinecone Inference cross-encoder scores each (query, candidate) pair
-      jointly. Selection is pure semantic relevance; the cross-encoder is
-      significantly more precise than cosine similarity.
+      Self-hosted bge-reranker-v2-m3 cross-encoder scores each
+      (query, candidate) pair jointly. Selection is pure semantic relevance;
+      the cross-encoder is significantly more precise than cosine similarity.
 
     Stage 3 — Order:
       Sort selected chunks by (doc_reference_order ASC, reranker_score DESC).
@@ -298,10 +308,27 @@ def retrieve_and_rerank(query: str) -> list[RetrievedChunk]:
 
     Returns an empty list if no candidates pass the similarity noise floor,
     which the pipeline treats as the "no_results" fallback.
-    """
-    update_current_span(input={"query": query})
 
-    embedding = embed_query(query)
+    profile: UserProfile | None — only used for HyDE personalisation when
+    HyDE is enabled. Annotated loosely as `None` default so callers without
+    profile (tests, internal tools) still work without conditional imports.
+    """
+    update_current_span(input={
+        "query": query,
+        "hyde_enabled": settings.hyde_enabled and profile is not None,
+    })
+
+    # Stage 0: HyDE transformation, opt-in via settings + requires profile.
+    if settings.hyde_enabled and profile is not None:
+        # Import inside the conditional so retriever has no hard dep on
+        # hyde.py when HyDE is disabled (and to avoid a circular import if
+        # hyde ever needs the embedder).
+        from backend.app.rag.hyde import generate_hypothetical_answer
+        text_to_embed = generate_hypothetical_answer(query, profile)
+    else:
+        text_to_embed = query
+
+    embedding = embed_query(text_to_embed)
 
     # Stage 1: recall from all sources, pool, deduplicate.
     all_candidates: list[RetrievedChunk] = []

@@ -96,6 +96,22 @@ class Settings(BaseSettings):
     # Lower temperature = more consistent, factual answers (good for medical).
     llm_temperature: float = 0.3
 
+    # --- HyDE knobs ---
+    # HyDE (Hypothetical Document Embeddings) transforms the query before
+    # retrieval: a small LLM generates a plausible hypothetical answer, and
+    # we embed THAT instead of the raw question. The hypothetical answer is
+    # semantically closer to actual answer chunks than a question is, closing
+    # the prose↔question gap that hurts retrieval on natural-language queries.
+    # Default ON for production — A/B in eval via `--no-hyde` to compare.
+    # Cost: one extra LLM call per query (~50-200ms, ~$0.0001 per query).
+    hyde_enabled: bool = True
+    # Model for the HyDE generation step. Cheap+fast is the right tradeoff —
+    # the hypothetical answer is for embedding, not user-visible output.
+    hyde_model: str = "gpt-4.1-nano"
+    # temperature=0 for reproducibility; same hypothetical answer for the
+    # same query enables apples-to-apples eval comparisons.
+    hyde_temperature: float = 0.0
+
     # --- Chunking knobs ---
     # SemanticChunker (langchain_experimental) groups consecutive sentences into
     # a chunk, cutting only where the embedding distance between neighbouring

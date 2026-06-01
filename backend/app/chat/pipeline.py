@@ -206,8 +206,11 @@ def run_chat(
         return ChatResponse(response_type=response_type, answer=canned)
 
     # 2. Retrieve: recall from all sources, rerank, order by source priority.
+    # Pass profile so HyDE (when enabled) can personalise the hypothetical
+    # answer it embeds — a vegetarian asking about protein gets a plant-based
+    # hypothetical that matches plant-based chunks better.
     query = augment_query(request.message, profile)
-    chunks = retrieve_and_rerank(query)
+    chunks = retrieve_and_rerank(query, profile)
 
     # 3. No relevant chunks → no_results fallback (still no answer-LLM call).
     if not chunks:

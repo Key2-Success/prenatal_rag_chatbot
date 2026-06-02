@@ -1,60 +1,62 @@
 """
-chunker.py — PDF loading (via LlamaParse) and semantic text chunking.
+chunker.py — PDF loading (via pypdf) and semantic text chunking.
 
 Two-stage ingestion:
 
-  Stage 1 — Parse (LlamaParse, hosted):
-    pypdf was the previous parser. It flattens tables into space-separated
-    soup, merges multi-column layouts row-by-row across columns, and drops
-    figures entirely. For a corpus that has nutrition intake tables, dietary
-    schedules, and multi-column anaemia guidelines, that's a data-quality
-    defect at the parse step that no downstream chunker can recover from.
+  Stage 1 — Parse (pypdf):
+    Basic text extraction. pypdf reads the PDF's text stream in roughly
+    reading order and returns a string per page. Tables get flattened to
+    space-separated text, multi-column layouts get interleaved row-by-row,
+    and images are dropped (the captions stay).
 
-    LlamaParse is the LlamaIndex team's hosted parser, currently SOTA for
-    structured-PDF extraction in production RAG. Tables come out as proper
-    markdown tables (| col | col | rows | preserved); multi-column layouts
-    are linearised correctly; figures and equations get descriptive captions
-    instead of being silently dropped. result_type="markdown" gives us text
-    the embedding model and the LLM both read more cleanly than pypdf's raw
-    extraction.
-
-    Cost: 1000 pages/day free tier; ~$3/1000 pages paid. Our corpus is well
-    under that.
+    Reverted from LlamaParse (May 2026) after A/B testing: LlamaParse
+    cleanly extracted tables as markdown but the resulting clean-prose
+    chunks shifted the answer-LLM's register toward bureaucratic
+    "the guidelines recommend..." prose, broke the diet-filter rule
+    (vegetarian users got non-veg sources because cleaner chunks bundled
+    all foods together), and dropped RAGAS answer_relevancy 0.868 → 0.715.
+    pypdf's noisier extraction forces the LLM to synthesise across chunks,
+    which (counterintuitively) produces more fluent, more personalised
+    user-facing answers in this corpus. Engineering trumps tool collection.
 
   Stage 2 — Chunk (SemanticChunker):
-    Unchanged. Splits each page's markdown into chunks at the largest topic
-    shifts (top 5% of inter-sentence embedding-distance jumps). Operates on
-    markdown text from LlamaParse, which gives cleaner sentence boundaries
-    than the soup pypdf produced — same chunker, better input.
+    Splits each page's text into chunks at the largest topic shifts
+    (top 5% of inter-sentence embedding-distance jumps). Same chunker
+    we used with LlamaParse; only the parser changed back.
 
 Design decisions:
-  - LlamaParse called via the synchronous `load_data()` path. The async path
-    streams pages back as they're parsed; we don't need that latency win for
-    a one-time ingestion script. Sync is simpler and the wait is bounded.
-  - One LlamaParse client per chunk_pdf() call. The client holds an HTTP
-    session; sharing across files isn't critical at this scale but the
-    re-init cost is negligible.
-  - Per-page chunking is retained. LlamaParse returns one Document per page
-    by default, which lines up with our `page_number` metadata. The page is
-    still the provenance unit; chunks never cross page boundaries.
-  - api_key passed directly via constructor — no os.environ side effects,
-    same pattern as OpenAIEmbeddings.
+  - One splitter instance per chunk_pdf() call, shared across all pages.
+    SemanticChunker embeds sentences via the OpenAI API on every
+    split_text() call; sharing avoids repeated client init.
+  - Per-page chunking is retained. The PDF page is the natural unit that
+    preserves page_number metadata; chunking across page boundaries would
+    lose that provenance.
+  - breakpoint_threshold_type="percentile", amount=95 by default.
+    Only cut where the similarity drop is in the top 5% of all observed
+    drops on that page — i.e., only on genuine topic shifts. Tunable at
+    runtime via SEMANTIC_BREAKPOINT_THRESHOLD_AMOUNT.
+  - api_key passed directly to OpenAIEmbeddings — no os.environ side
+    effects. langchain_openai.OpenAIEmbeddings accepts api_key= as a
+    constructor param, so we pass settings.openai_api_key directly.
+
+Token audit:
+  After chunking, _report_token_stats prints min/median/p95/max chunk
+  lengths in tokens — surfaces silent-truncation risk early if chunks
+  ever creep above the 8191/8192 caps for embeddings/reranker.
 """
 
 from pathlib import Path
 
 from langchain_experimental.text_splitter import SemanticChunker
 from langchain_openai import OpenAIEmbeddings
-from llama_cloud_services import LlamaParse
 from pydantic import BaseModel
+from pypdf import PdfReader
 
 from backend.app.config import DATA_DIR, settings
 from backend.app.sources import Source, sources_by_filename
 
 # Drop chunks shorter than this — they're almost always page numbers,
-# headers, or extraction noise that hurt retrieval signal. LlamaParse
-# produces cleaner output than pypdf so this filter triggers less often,
-# but it still catches "Page 12 of 47" footers etc.
+# headers, or extraction noise that hurt retrieval signal.
 MIN_CHUNK_CHARS = 50
 
 
@@ -70,63 +72,19 @@ class Chunk(BaseModel):
 
 
 class _Page(BaseModel):
-    """Internal: extracted markdown for a single PDF page."""
+    """Internal: extracted text for a single PDF page."""
     text: str
     page_number: int
 
 
-def _build_parser() -> LlamaParse:
-    """
-    Build a LlamaParse client configured for markdown output.
-
-    result_type="markdown" is the key knob: tables come back as | col | col |
-    rows, headings as #/##, lists as bullets. This is what makes the parse
-    a step-change over pypdf — the LLM and the embedding model both
-    understand markdown structure natively, where pypdf's space-separated
-    table soup is ambiguous to both.
-
-    The API key is required at this point. Fail loud here rather than at the
-    first network call so the user gets a clear setup error if they forgot
-    LLAMA_CLOUD_API_KEY.
-    """
-    if not settings.llama_cloud_api_key:
-        raise RuntimeError(
-            "LLAMA_CLOUD_API_KEY is not set in .env — required for "
-            "ingestion. Sign up at https://cloud.llamaindex.ai (free tier "
-            "includes 1000 pages/day, more than enough for this project)."
-        )
-    return LlamaParse(
-        api_key=settings.llama_cloud_api_key,
-        result_type="markdown",
-        # Verbose tells the user which page is being parsed — useful for a
-        # one-time ingest, where the user is watching the script run.
-        verbose=True,
-    )
-
-
-def _extract_pages(pdf_path: Path, parser: LlamaParse) -> list[_Page]:
-    """
-    Parse a PDF into a list of per-page markdown blobs.
-
-    LlamaParse.load_data returns one Document per page by default, with a
-    "page" key in metadata (1-based). We unwrap into our _Page shape so the
-    rest of the chunker doesn't have to know about LlamaIndex types.
-
-    Empty pages (some PDFs have blank separator pages) get dropped here so
-    the downstream chunker doesn't waste an embedding call on whitespace.
-    """
-    documents = parser.load_data(str(pdf_path))
-    pages: list[_Page] = []
-    for doc in documents:
-        text = (doc.text or "").strip()
-        if not text:
-            continue
-        # LlamaParse stores 1-based page number in metadata["page"]. Fall
-        # back to enumeration order if the key isn't there (shouldn't happen
-        # but defensive — we don't want to crash ingestion on a metadata edge
-        # case from a future LlamaParse version).
-        page_number = doc.metadata.get("page", len(pages) + 1)
-        pages.append(_Page(text=text, page_number=page_number))
+def _extract_pages(pdf_path: Path) -> list[_Page]:
+    """Extract non-empty pages from a PDF, preserving 1-based page numbers."""
+    reader = PdfReader(pdf_path)
+    pages = []
+    for i, page in enumerate(reader.pages, start=1):
+        text = (page.extract_text() or "").strip()
+        if text:
+            pages.append(_Page(text=text, page_number=i))
     return pages
 
 
@@ -136,8 +94,9 @@ def _build_splitter() -> SemanticChunker:
 
     Uses the same model (text-embedding-3-small) as the query embedder for
     consistency — semantic proximity at ingest time matches semantic
-    proximity at retrieval time. The api_key is passed directly rather than
-    relying on os.environ so this module has no env-mutation side effects.
+    proximity at retrieval time. The api_key is passed directly rather
+    than relying on os.environ so this module has no env-mutation side
+    effects.
     """
     embeddings = OpenAIEmbeddings(
         model="text-embedding-3-small",
@@ -151,7 +110,7 @@ def _build_splitter() -> SemanticChunker:
 
 
 def _chunks_for_page(page: _Page, source: Source, splitter: SemanticChunker) -> list[Chunk]:
-    """Split one page's markdown into Chunks stamped with source metadata."""
+    """Split one page's text into Chunks stamped with source metadata."""
     chunks: list[Chunk] = []
     for raw in splitter.split_text(page.text):
         text = raw.strip()
@@ -173,12 +132,10 @@ def chunk_pdf(file_name: str) -> list[Chunk]:
     """Chunk a single PDF declared in sources.json."""
     source = sources_by_filename()[file_name]
     pdf_path = DATA_DIR / f"{file_name}.pdf"
-
-    parser = _build_parser()
     splitter = _build_splitter()
 
     chunks: list[Chunk] = []
-    for page in _extract_pages(pdf_path, parser):
+    for page in _extract_pages(pdf_path):
         chunks.extend(_chunks_for_page(page, source, splitter))
     return chunks
 
@@ -190,22 +147,23 @@ def _report_token_stats(chunks: list[Chunk]) -> None:
     Why we measure: SemanticChunker produces variable-length chunks, which
     is good for semantic coherence but exposes us to silent-truncation
     bugs. The two downstream caps that matter:
-      - text-embedding-3-small accepts up to 8191 tokens; anything longer is
-        truncated FROM THE END (you lose the tail of the chunk silently).
-      - bge-reranker-v2-m3 accepts up to 8192 tokens per (query + doc) pair;
-        same truncation behaviour.
+      - text-embedding-3-small accepts up to 8191 tokens; anything longer
+        is truncated FROM THE END (you lose the tail of the chunk
+        silently).
+      - bge-reranker-v2-m3 accepts up to 8192 tokens per (query + doc)
+        pair; same truncation behaviour.
 
     What "safe" looks like for this corpus: max should comfortably sit
     under ~2000 tokens (typical PDF pages are 300-1200 tokens, and we
     chunk WITHIN pages). If max approaches 8000, we've found a giant
-    uninterrupted block (probably a long table or an unbreakable
+    uninterrupted block (probably a long table or unbreakable
     monolithic paragraph) and need to either lower the SemanticChunker
     breakpoint percentile or add a hard-cap splitter as a backstop.
 
     Uses tiktoken with the cl100k_base encoding — same tokeniser used by
     text-embedding-3-small. Approximate for the reranker (which uses
-    sentencepiece) but accurate to within ~10-20%, which is plenty for
-    a sanity audit.
+    sentencepiece) but accurate to within ~10-20%, plenty for a sanity
+    audit.
     """
     import tiktoken
     enc = tiktoken.get_encoding("cl100k_base")
@@ -224,11 +182,12 @@ def _report_token_stats(chunks: list[Chunk]) -> None:
     print(f"  max      = {longest}")
     print(f"  caps     = 8191 (embedding) / 8192 (reranker)")
     if longest > 8000:
-        print(f"  ⚠ WARNING: longest chunk ({longest} tokens) is at or above the "
-              f"embedding/reranker cap. The tail will be truncated silently.")
+        print(f"  ⚠ WARNING: longest chunk ({longest} tokens) is at or above "
+              f"the embedding/reranker cap. The tail will be truncated silently.")
     elif longest > 4000:
-        print(f"  ⚠ NOTE: longest chunk ({longest} tokens) is unusually long for "
-              f"this corpus — investigate whether a single chunk should be split.")
+        print(f"  ⚠ NOTE: longest chunk ({longest} tokens) is unusually long "
+              f"for this corpus — investigate whether a single chunk should "
+              f"be split.")
 
 
 def chunk_all_pdfs() -> list[Chunk]:

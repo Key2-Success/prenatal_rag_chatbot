@@ -400,6 +400,21 @@ def retrieve_and_rerank(query: str, profile=None) -> list[RetrievedChunk]:
             "sources_in_output": list({c.org_display_name for c in ranked}),
             "top_reranker_score": ranked[0].score if ranked else None,
             "pages": [f"{c.org_display_name} p.{c.page_number}" for c in ranked],
+            # Full chunk text + per-chunk metadata so the trace UI shows
+            # what the LLM actually ingested. Without this, debugging "why
+            # did the LLM answer about vitamin A?" required re-running
+            # retrieval offline — this puts the answer one click away in
+            # the Langfuse span. Verbose (~5KB per case) but worth it.
+            "chunks": [
+                {
+                    "source": c.org_display_name,
+                    "page": c.page_number,
+                    "doc_title": c.doc_title,
+                    "score": c.score,
+                    "text": c.text,
+                }
+                for c in ranked
+            ],
         },
     )
     return ranked

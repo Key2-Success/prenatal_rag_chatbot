@@ -117,11 +117,22 @@ class Settings(BaseSettings):
     # a chunk, cutting only where the embedding distance between neighbouring
     # sentence groups exceeds the threshold.
     # "percentile" cuts at the Nth percentile of observed distances — higher N
-    # means fewer cuts (longer, more coherent chunks). 95 = cut only at the
-    # top 5% largest topic shifts; reasonable starting point for structured
-    # clinical guidelines. Override per-run: SEMANTIC_BREAKPOINT_THRESHOLD_AMOUNT=90
+    # means fewer cuts (longer, more coherent chunks). Lowered from 95 → 85
+    # after LlamaParse re-migration: cleaner markdown from LlamaParse means
+    # pages with many numbered sub-sections (e.g. 1.3.2.1–1.3.2.8) can land
+    # in a single chunk at 95th percentile because sub-section boundaries don't
+    # produce top-5% distance jumps. 85th percentile catches those section
+    # boundaries and keeps chunks topically focused.
+    # Override per-run: SEMANTIC_BREAKPOINT_THRESHOLD_AMOUNT=90
     semantic_breakpoint_threshold_type: str = "percentile"
-    semantic_breakpoint_threshold_amount: float = 95.0
+    semantic_breakpoint_threshold_amount: float = 85.0
+    # Hard token cap applied AFTER SemanticChunker as a backstop. Any chunk
+    # exceeding this limit is split further with RecursiveCharacterTextSplitter
+    # (token-aware, sentence-boundary-respecting). Set to 512 based on the
+    # observed p90=502 token distribution — catches the top ~10% of outlier
+    # chunks without fragmenting the median (203 tokens) chunks.
+    # Override per-run: CHUNK_MAX_TOKENS=400
+    chunk_max_tokens: int = 512
 
     # --- Classifier knobs ---
     # Triage LLM that labels each incoming message as in_scope / emergency /

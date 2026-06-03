@@ -54,8 +54,10 @@ Token audit:
 
 from pathlib import Path
 
+import tiktoken
 from langchain_experimental.text_splitter import SemanticChunker
 from langchain_openai import OpenAIEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from llama_cloud_services import LlamaParse
 from pydantic import BaseModel
 
@@ -162,22 +164,56 @@ def _build_splitter() -> SemanticChunker:
     )
 
 
+_TOKENIZER = tiktoken.get_encoding("cl100k_base")
+
+
+def _apply_token_cap(text: str) -> list[str]:
+    """
+    Split text that exceeds settings.chunk_max_tokens into smaller pieces.
+
+    Called as a second-pass backstop after SemanticChunker. SemanticChunker
+    is the primary splitter and handles topical coherence; this function only
+    fires for chunks that somehow still exceed the token cap (e.g. a single
+    dense sub-section with no strong sentence-boundary distance jumps).
+
+    Uses RecursiveCharacterTextSplitter.from_tiktoken_encoder so splits are
+    token-aware and respect sentence/paragraph boundaries. chunk_overlap=0 —
+    the SemanticChunker already produced a topically coherent unit; we're just
+    enforcing a size ceiling, not trying to preserve cross-chunk context here.
+    """
+    if len(_TOKENIZER.encode(text)) <= settings.chunk_max_tokens:
+        return [text]
+    cap_splitter = RecursiveCharacterTextSplitter.from_tiktoken_encoder(
+        encoding_name="cl100k_base",
+        chunk_size=settings.chunk_max_tokens,
+        chunk_overlap=0,
+    )
+    return cap_splitter.split_text(text)
+
+
 def _chunks_for_page(page: _Page, source: Source, splitter: SemanticChunker) -> list[Chunk]:
-    """Split one page's text into Chunks stamped with source metadata."""
+    """
+    Split one page's markdown into Chunks stamped with source metadata.
+
+    Two-pass splitting:
+      1. SemanticChunker — primary splitter, cuts on topic shifts.
+      2. _apply_token_cap — backstop for any chunk still over the token cap.
+    """
     chunks: list[Chunk] = []
     for raw in splitter.split_text(page.text):
-        text = raw.strip()
-        if len(text) < MIN_CHUNK_CHARS:
-            continue
-        chunks.append(Chunk(
-            text=text,
-            source_file=source.file_name,
-            org_display_name=source.org_display_name,
-            doc_title=source.doc_title,
-            doc_reference_order=source.doc_reference_order,
-            year_published=source.doc_year_published,
-            page_number=page.page_number,
-        ))
+        for text in _apply_token_cap(raw.strip()):
+            text = text.strip()
+            if len(text) < MIN_CHUNK_CHARS:
+                continue
+            chunks.append(Chunk(
+                text=text,
+                source_file=source.file_name,
+                org_display_name=source.org_display_name,
+                doc_title=source.doc_title,
+                doc_reference_order=source.doc_reference_order,
+                year_published=source.doc_year_published,
+                page_number=page.page_number,
+            ))
     return chunks
 
 

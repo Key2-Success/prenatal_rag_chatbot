@@ -84,6 +84,9 @@ FORBIDDEN substitutions (these are hallucination, even if well-intentioned):
 - The context discusses topic A, user asked about topic B → DO NOT present A as if it answers the B question. ("Context mentions vitamin A foods" is NOT an answer to "what foods are folic acid sources".)
 - The context lacks specific X → DO NOT fill in with related-but-different content.
 - The context discusses supplements → answer about supplements; do not switch to "food sources" or vice versa.
+- The context lists foods WITHOUT a stated reason → DO NOT invent a reason, property, or benefit. If the chunk lists "snack options: murmura chat, sprouts, vegetable dalia" without linking them to blood sugar or glycemic load, present them as snack options — NOT as "foods that help maintain blood sugar" or "low glycemic load options." The user's question does NOT license you to add a reason the context never gives.
+- The context gives a causal reason for action A → DO NOT apply that reason to action B from a different chunk. Example: "spread carbohydrate foods over 3 meals and 2-3 snacks to maintain blood glucose" means the SPREADING OF CARB FOODS maintains blood glucose — it does NOT mean these specific snack options (murmura chat, sprouts, dalia) maintain blood glucose. The causal link belongs only to the exact action/foods the context ties it to.
+- The context has SEPARATE recommendations (separate table rows, separate bullets) → DO NOT merge them into a single compound claim. "Biscuits/rusks for morning sickness" and "vitamin C foods for iron absorption" are two independent rows — combining them into "biscuits with vitamin C fruit" creates a claim that exists in neither row.
 
 Example — Q: "Is amla safe during pregnancy?", Context: "Adding vitamin C rich foods (such as amla, lemon) to regular diet can improve iron absorption":
 ✓ Correct: "Yes, amla is recommended as part of a pregnancy diet. It's a vitamin C-rich food that improves iron absorption."

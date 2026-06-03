@@ -1,43 +1,50 @@
 """
-chunker.py — PDF loading (via pypdf) and semantic text chunking.
+chunker.py — PDF loading (via LlamaParse) and semantic text chunking.
 
 Two-stage ingestion:
 
-  Stage 1 — Parse (pypdf):
-    Basic text extraction. pypdf reads the PDF's text stream in roughly
-    reading order and returns a string per page. Tables get flattened to
-    space-separated text, multi-column layouts get interleaved row-by-row,
-    and images are dropped (the captions stay).
+  Stage 1 — Parse (LlamaParse, hosted):
+    pypdf was the previous parser. It flattens tables into space-separated
+    soup, merges multi-column layouts row-by-row across columns, and drops
+    figures entirely. For a corpus that has nutrition intake tables, dietary
+    schedules, and multi-column anaemia guidelines, that's a data-quality
+    defect at the parse step that no downstream chunker can recover from.
 
-    Reverted from LlamaParse (May 2026) after A/B testing: LlamaParse
-    cleanly extracted tables as markdown but the resulting clean-prose
-    chunks shifted the answer-LLM's register toward bureaucratic
-    "the guidelines recommend..." prose, broke the diet-filter rule
-    (vegetarian users got non-veg sources because cleaner chunks bundled
-    all foods together), and dropped RAGAS answer_relevancy 0.868 → 0.715.
-    pypdf's noisier extraction forces the LLM to synthesise across chunks,
-    which (counterintuitively) produces more fluent, more personalised
-    user-facing answers in this corpus. Engineering trumps tool collection.
+    LlamaParse is the LlamaIndex team's hosted parser, currently SOTA for
+    structured-PDF extraction in production RAG. Tables come out as proper
+    markdown tables (| col | col | rows | preserved); multi-column layouts
+    are linearised correctly; figures and equations get descriptive captions
+    instead of being silently dropped. result_type="markdown" gives us text
+    the embedding model and the LLM both read more cleanly than pypdf's raw
+    extraction.
+
+    Cost: 1000 pages/day free tier; ~$3/1000 pages paid. Our corpus is well
+    under that.
+
+    History: reverted to pypdf in May 2026 after A/B test showed a drop in
+    RAGAS answer_relevancy (0.868 → 0.715). Root cause was later traced to a
+    concurrent prompt change (commit f24e132) that introduced bureaucratic
+    few-shot examples — NOT LlamaParse. The prompt has since been corrected;
+    this re-migration tests LlamaParse fairly against the current prompt.
 
   Stage 2 — Chunk (SemanticChunker):
-    Splits each page's text into chunks at the largest topic shifts
-    (top 5% of inter-sentence embedding-distance jumps). Same chunker
-    we used with LlamaParse; only the parser changed back.
+    Unchanged. Splits each page's markdown into chunks at the largest topic
+    shifts (top 5% of inter-sentence embedding-distance jumps). Operates on
+    markdown text from LlamaParse, which gives cleaner sentence boundaries
+    than the soup pypdf produced — same chunker, better input.
 
 Design decisions:
-  - One splitter instance per chunk_pdf() call, shared across all pages.
-    SemanticChunker embeds sentences via the OpenAI API on every
-    split_text() call; sharing avoids repeated client init.
-  - Per-page chunking is retained. The PDF page is the natural unit that
-    preserves page_number metadata; chunking across page boundaries would
-    lose that provenance.
-  - breakpoint_threshold_type="percentile", amount=95 by default.
-    Only cut where the similarity drop is in the top 5% of all observed
-    drops on that page — i.e., only on genuine topic shifts. Tunable at
-    runtime via SEMANTIC_BREAKPOINT_THRESHOLD_AMOUNT.
-  - api_key passed directly to OpenAIEmbeddings — no os.environ side
-    effects. langchain_openai.OpenAIEmbeddings accepts api_key= as a
-    constructor param, so we pass settings.openai_api_key directly.
+  - LlamaParse called via the synchronous `load_data()` path. The async path
+    streams pages back as they're parsed; we don't need that latency win for
+    a one-time ingestion script. Sync is simpler and the wait is bounded.
+  - One LlamaParse client per chunk_pdf() call. The client holds an HTTP
+    session; sharing across files isn't critical at this scale but the
+    re-init cost is negligible.
+  - Per-page chunking is retained. LlamaParse returns one Document per page
+    by default, which lines up with our `page_number` metadata. The page is
+    still the provenance unit; chunks never cross page boundaries.
+  - api_key passed directly via constructor — no os.environ side effects,
+    same pattern as OpenAIEmbeddings.
 
 Token audit:
   After chunking, _report_token_stats prints min/median/p95/max chunk
@@ -49,14 +56,16 @@ from pathlib import Path
 
 from langchain_experimental.text_splitter import SemanticChunker
 from langchain_openai import OpenAIEmbeddings
+from llama_cloud_services import LlamaParse
 from pydantic import BaseModel
-from pypdf import PdfReader
 
 from backend.app.config import DATA_DIR, settings
 from backend.app.sources import Source, sources_by_filename
 
 # Drop chunks shorter than this — they're almost always page numbers,
-# headers, or extraction noise that hurt retrieval signal.
+# headers, or extraction noise that hurt retrieval signal. LlamaParse
+# produces cleaner output than pypdf so this filter triggers less often,
+# but it still catches "Page 12 of 47" footers etc.
 MIN_CHUNK_CHARS = 50
 
 
@@ -72,19 +81,63 @@ class Chunk(BaseModel):
 
 
 class _Page(BaseModel):
-    """Internal: extracted text for a single PDF page."""
+    """Internal: extracted markdown for a single PDF page."""
     text: str
     page_number: int
 
 
-def _extract_pages(pdf_path: Path) -> list[_Page]:
-    """Extract non-empty pages from a PDF, preserving 1-based page numbers."""
-    reader = PdfReader(pdf_path)
-    pages = []
-    for i, page in enumerate(reader.pages, start=1):
-        text = (page.extract_text() or "").strip()
-        if text:
-            pages.append(_Page(text=text, page_number=i))
+def _build_parser() -> LlamaParse:
+    """
+    Build a LlamaParse client configured for markdown output.
+
+    result_type="markdown" is the key knob: tables come back as | col | col |
+    rows, headings as #/##, lists as bullets. This is what makes the parse
+    a step-change over pypdf — the LLM and the embedding model both
+    understand markdown structure natively, where pypdf's space-separated
+    table soup is ambiguous to both.
+
+    The API key is required at this point. Fail loud here rather than at the
+    first network call so the user gets a clear setup error if they forgot
+    LLAMA_CLOUD_API_KEY.
+    """
+    if not settings.llama_cloud_api_key:
+        raise RuntimeError(
+            "LLAMA_CLOUD_API_KEY is not set in .env — required for "
+            "ingestion. Sign up at https://cloud.llamaindex.ai (free tier "
+            "includes 1000 pages/day, more than enough for this project)."
+        )
+    return LlamaParse(
+        api_key=settings.llama_cloud_api_key,
+        result_type="markdown",
+        # Verbose tells the user which page is being parsed — useful for a
+        # one-time ingest, where the user is watching the script run.
+        verbose=True,
+    )
+
+
+def _extract_pages(pdf_path: Path, parser: LlamaParse) -> list[_Page]:
+    """
+    Parse a PDF into a list of per-page markdown blobs.
+
+    LlamaParse.load_data returns one Document per page by default, with a
+    "page" key in metadata (1-based). We unwrap into our _Page shape so the
+    rest of the chunker doesn't have to know about LlamaIndex types.
+
+    Empty pages (some PDFs have blank separator pages) get dropped here so
+    the downstream chunker doesn't waste an embedding call on whitespace.
+    """
+    documents = parser.load_data(str(pdf_path))
+    pages: list[_Page] = []
+    for doc in documents:
+        text = (doc.text or "").strip()
+        if not text:
+            continue
+        # LlamaParse stores 1-based page number in metadata["page"]. Fall
+        # back to enumeration order if the key isn't there (shouldn't happen
+        # but defensive — we don't want to crash ingestion on a metadata edge
+        # case from a future LlamaParse version).
+        page_number = doc.metadata.get("page", len(pages) + 1)
+        pages.append(_Page(text=text, page_number=page_number))
     return pages
 
 
@@ -132,10 +185,12 @@ def chunk_pdf(file_name: str) -> list[Chunk]:
     """Chunk a single PDF declared in sources.json."""
     source = sources_by_filename()[file_name]
     pdf_path = DATA_DIR / f"{file_name}.pdf"
+
+    parser = _build_parser()
     splitter = _build_splitter()
 
     chunks: list[Chunk] = []
-    for page in _extract_pages(pdf_path):
+    for page in _extract_pages(pdf_path, parser):
         chunks.extend(_chunks_for_page(page, source, splitter))
     return chunks
 

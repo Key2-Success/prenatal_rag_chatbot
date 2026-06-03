@@ -19,14 +19,20 @@ langchain-experimental==0.3.4
 # Pin: 3.x is the current stable; 4.x will break the import path again.
 sentence-transformers>=3.0,<4.0
 
-# PDF parsing: pypdf. We A/B tested LlamaParse against pypdf (May 2026) and
-# reverted to pypdf — see chunker.py module docstring for why. Briefly:
-# LlamaParse's clean markdown chunks shifted the answer-LLM register toward
-# bureaucratic prose, broke the diet-filter rule on shared chunks, and
-# dropped RAGAS answer_relevancy 0.868 → 0.715. pypdf's noisier extraction
-# forces more synthesis across chunks, producing more fluent and
-# personalised user-facing answers on this corpus.
-pypdf==5.1.0
+# PDF parsing: LlamaParse via llama-cloud-services. SOTA for structured-PDF
+# extraction: tables as markdown (| col | col |), multi-column layouts
+# linearised, OCR fallback for scanned pages. Used only at ingestion time
+# (`python -m scripts.ingest`), not at runtime. Previously reverted to pypdf
+# (May 2026) after a RAGAS drop — root cause was later traced to a concurrent
+# prompt change (bureaucratic few-shot examples), NOT LlamaParse. Re-migrated
+# once the prompt was corrected. Pinned to 0.6.x — pre-1.0 library, minor
+# bumps can rename API surfaces; re-pin after any upgrade.
+# NOTE: llama-cloud-services 0.6.x requires llama-cloud==0.1.46 exactly.
+# llama-cloud is pinned below to prevent accidental upgrades (2.x breaks the
+# import). Both packages are deprecated; migration to the new unified SDK
+# (llama-cloud>=1.0) is deferred until the LlamaParse API stabilises there.
+llama-cloud-services>=0.6,<0.7
+llama-cloud==0.1.46
 
 # Data & Config
 # Pydantic relaxed from a hard 2.10.4 pin to >=2.10,<3 — llama-cloud-services

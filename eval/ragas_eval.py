@@ -31,6 +31,7 @@ calls per run. Budget accordingly.
 """
 
 import argparse
+import contextvars
 import os
 import sys
 import time
@@ -206,12 +207,20 @@ def run_and_capture(
 
     t0 = time.perf_counter()
     try:
-        with propagate_attributes(
-            trace_name=case.id,
-            session_id=run_id,
-            tags=tags,
-        ):
-            response = run_chat(request, _eval_capture=capture)
+        # Isolate each run_chat() call in a fresh contextvars.Context so
+        # Langfuse state left over from a previous RAGAS evaluate() call
+        # doesn't bleed in. Without this, get_current_trace_id() inside
+        # run_chat() returns a stale RAGAS trace ID (from the prior run's
+        # evaluate()), causing all scores to land on the wrong traces.
+        def _run_isolated() -> None:
+            with propagate_attributes(
+                trace_name=case.id,
+                session_id=run_id,
+                tags=tags,
+            ):
+                return run_chat(request, _eval_capture=capture)
+
+        response = contextvars.Context().run(_run_isolated)
     except Exception as e:
         elapsed = time.perf_counter() - t0
         routing = RoutingResult(
@@ -438,10 +447,22 @@ def attach_scores_to_langfuse(
     answer_cases: list[AnswerCase],
     scores_df,
     judge_model: str,
+    metric_prefix: str = "",
 ) -> int:
     """
     Loop the per-row RAGAS scores back to the Langfuse traces that produced
     each answer. Returns the count of successfully attached scores.
+
+    metric_prefix is prepended to each metric name — use "" for raw per-run
+    scores and "mean_" for the cross-run averaged scores so both appear on
+    the same trace without collision (e.g. "faithfulness" vs
+    "mean_faithfulness").
+
+    Using a prefix rather than a suffix keeps Langfuse's alphabetical column
+    ordering user-friendly: all raw scores (answer_relevancy, faithfulness,
+    llm_context_precision_without_reference) sort before all mean scores
+    (mean_answer_relevancy, …) because "m" > "l", giving a clean 3×2 layout
+    in the Scores column picker.
 
     Each score comment includes the case id, category, and judge model so
     the Langfuse Scores table is self-explanatory.
@@ -468,7 +489,7 @@ def attach_scores_to_langfuse(
                 continue
             langfuse.create_score(
                 trace_id=ac.trace_id,
-                name=metric,
+                name=metric_prefix + metric,
                 value=value,
                 data_type="NUMERIC",
                 comment=(
@@ -1238,6 +1259,9 @@ def main() -> int:
     all_score_dfs: list = []
     all_routing_results: list[list[RoutingResult]] = [None] * args.runs  # filled by index
     per_run_answer_cases: list[list[AnswerCase] | None] = [None] * args.runs
+    # Parallel to per_run_answer_cases — None for runs whose RAGAS scoring
+    # failed. Used to attach each run's raw scores to that run's own traces.
+    per_run_score_dfs: list = [None] * args.runs
 
     # Pre-warm the self-hosted reranker in this thread BEFORE spawning any
     # workers. The first reranker call on MPS triggers Metal-kernel
@@ -1316,6 +1340,7 @@ def main() -> int:
                 per_run_answer_cases[run_idx] = answer_cases
                 if score_df is not None:
                     all_score_dfs.append(score_df)
+                    per_run_score_dfs[run_idx] = score_df
 
                 print()
                 print("┌" + "─" * 70 + "┐")
@@ -1336,6 +1361,7 @@ def main() -> int:
             per_run_answer_cases[run_idx] = answer_cases
             if score_df is not None:
                 all_score_dfs.append(score_df)
+                per_run_score_dfs[run_idx] = score_df
 
     # Display data is always from run 1 regardless of completion order.
     display_routing_results = all_routing_results[0]
@@ -1387,11 +1413,29 @@ def main() -> int:
         )
 
         if not args.no_langfuse_scores and settings.langfuse_enabled:
-            # Attach the AVERAGED scores to the run-1 traces (the only ones whose
-            # answer text is in the report). This gives a stable, comparable
-            # dashboard score per case without N duplicates per metric.
-            n = attach_scores_to_langfuse(answer_cases, means_df, judge_model=args.judge_model)
-            print(f"\n  Attached {n} averaged score(s) to Langfuse traces.")
+            total_attached = 0
+            # Attach each run's raw scores to that run's own traces so no
+            # run's data is silently lost in Langfuse.
+            for run_idx in range(args.runs):
+                run_cases = per_run_answer_cases[run_idx]
+                run_score_df = per_run_score_dfs[run_idx]
+                if run_cases and run_score_df is not None:
+                    total_attached += attach_scores_to_langfuse(
+                        run_cases, run_score_df, judge_model=args.judge_model,
+                    )
+            # For multi-run: also attach the cross-run mean to every run's
+            # traces with a "_mean" suffix so Langfuse shows both the
+            # individual run score and the averaged score on the same trace.
+            if args.runs > 1:
+                for run_idx in range(args.runs):
+                    run_cases = per_run_answer_cases[run_idx]
+                    if run_cases:
+                        total_attached += attach_scores_to_langfuse(
+                            run_cases, means_df,
+                            judge_model=args.judge_model,
+                            metric_prefix="mean_",
+                        )
+            print(f"\n  Attached {total_attached} score(s) to Langfuse traces.")
             print(f"  View session: https://cloud.langfuse.com/sessions/{run_id}")
         elif not settings.langfuse_enabled:
             print("\n  (Langfuse not configured — skipping score attachment.)")

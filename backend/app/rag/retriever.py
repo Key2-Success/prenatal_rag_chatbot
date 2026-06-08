@@ -35,7 +35,7 @@ import numpy as np
 from pinecone import Pinecone, ServerlessSpec
 from pydantic import BaseModel
 
-from backend.app.config import settings
+from backend.app.config import PROJECT_ROOT, settings
 from backend.app.observability import observe, update_current_span
 from backend.app.rag.chunker import Chunk
 from backend.app.rag.embedder import EMBEDDING_DIMENSIONS, embed_query
@@ -56,6 +56,13 @@ _pinecone_index = None
 # simultaneously. After the first load, _get_reranker() is a pure dict lookup.
 _reranker = None
 _reranker_lock = threading.Lock()
+
+# BM25 encoder singleton + lock. Loaded from disk on first call; the encoder
+# is fitted on the full corpus at ingest time and serialised to
+# settings.bm25_encoder_path. Same double-checked locking pattern as the
+# reranker — parallel eval workers share one loaded instance.
+_bm25_encoder = None
+_bm25_encoder_lock = threading.Lock()
 
 
 class RetrievedChunk(BaseModel):
@@ -183,40 +190,118 @@ def _get_reranker():
     return _reranker
 
 
+def _get_bm25_encoder():
+    """
+    Return the cached BM25Encoder, loading from disk on first call.
+
+    The encoder is fitted on the full corpus at ingest time
+    (scripts/ingest.py) and saved to settings.bm25_encoder_path. Loading is
+    lazy so importing this module is cheap (ingest scripts, tests, and the
+    eval driver all import retriever without needing the encoder).
+
+    Fails loud if the encoder file doesn't exist — this means hybrid ingest
+    hasn't been run yet, and silently falling back to dense-only would produce
+    misleading retrieval behaviour without any observable signal.
+
+    Thread-safe via double-checked lock: same pattern as _get_reranker().
+    """
+    global _bm25_encoder
+    if _bm25_encoder is not None:
+        return _bm25_encoder
+    with _bm25_encoder_lock:
+        if _bm25_encoder is None:
+            from pinecone_text.sparse import BM25Encoder
+            encoder_path = PROJECT_ROOT / settings.bm25_encoder_path
+            if not encoder_path.exists():
+                raise RuntimeError(
+                    f"BM25 encoder not found at '{settings.bm25_encoder_path}'. "
+                    f"The index must be re-created and re-ingested with hybrid "
+                    f"sparse vectors. Run:\n"
+                    f"    python -m scripts.ingest --recreate-index"
+                )
+            print(f"[retriever] Loading BM25 encoder from {settings.bm25_encoder_path}...")
+            _bm25_encoder = BM25Encoder().load(str(encoder_path))
+    return _bm25_encoder
+
+
 def get_index():
-    """Lazily initialise and return the Pinecone index handle."""
+    """
+    Lazily initialise and return the Pinecone index handle.
+
+    Creates the index on first call for a fresh project. For an existing
+    index, validates that the metric is 'dotproduct' — required for hybrid
+    sparse+dense retrieval. For normalised dense vectors (OpenAI
+    text-embedding-3-small outputs unit vectors), dotproduct == cosine
+    similarity, so this is a transparent change for the dense channel.
+
+    Fails loud if the existing index uses a different metric rather than
+    silently degrading: hybrid queries sent to a cosine index return
+    unexpected results because Pinecone applies metric-specific score
+    normalisation that conflicts with our client-side alpha scaling.
+    """
     global _pinecone_index
     if _pinecone_index is not None:
         return _pinecone_index
 
     pc = _get_client()
-    if settings.pinecone_index_name not in pc.list_indexes().names():
+    existing_names = pc.list_indexes().names()
+
+    if settings.pinecone_index_name not in existing_names:
+        # Fresh project — create with dotproduct from the start.
         pc.create_index(
             name=settings.pinecone_index_name,
             dimension=EMBEDDING_DIMENSIONS,
-            metric="cosine",
+            metric="dotproduct",
             spec=ServerlessSpec(cloud="aws", region="us-east-1"),
         )
+    else:
+        # Existing index — verify metric is dotproduct.
+        info = pc.describe_index(settings.pinecone_index_name)
+        if info.metric != "dotproduct":
+            raise RuntimeError(
+                f"Index '{settings.pinecone_index_name}' uses metric='{info.metric}' "
+                f"but hybrid search requires 'dotproduct'. Recreate it by running:\n"
+                f"    python -m scripts.ingest --recreate-index"
+            )
+
     _pinecone_index = pc.Index(settings.pinecone_index_name)
     return _pinecone_index
 
 
 def upsert_chunks(chunks: list[Chunk], embeddings: list[list[float]]) -> None:
-    """Upsert chunk embeddings + metadata into Pinecone, batched."""
+    """
+    Upsert chunk embeddings + sparse vectors + metadata into Pinecone, batched.
+
+    Each record carries:
+      - values:         dense embedding (OpenAI text-embedding-3-small, 1536-dim)
+      - sparse_values:  BM25 sparse vector (indices + values from the corpus-
+                        fitted BM25Encoder loaded from settings.bm25_encoder_path)
+      - metadata:       full Chunk fields for filtering and display
+
+    The BM25Encoder must be fitted and saved before this is called — the ingest
+    script handles that in a separate pass over the full corpus before upserting.
+    """
     if len(chunks) != len(embeddings):
         raise ValueError(
             f"chunks ({len(chunks)}) and embeddings ({len(embeddings)}) "
             f"must have equal length"
         )
 
+    # Encode all chunk texts to sparse BM25 vectors in one batch.
+    # _get_bm25_encoder() loads the corpus-fitted encoder from disk (lazy,
+    # cached). encode_documents returns List[{"indices": [...], "values": [...]}].
+    bm25 = _get_bm25_encoder()
+    sparse_vecs = bm25.encode_documents([c.text for c in chunks])
+
     index = get_index()
     vectors = [
         {
             "id": str(uuid.uuid4()),
             "values": emb,
+            "sparse_values": sparse_vec,
             "metadata": chunk.model_dump(),
         }
-        for chunk, emb in zip(chunks, embeddings)
+        for chunk, emb, sparse_vec in zip(chunks, embeddings, sparse_vecs)
     ]
 
     for i in range(0, len(vectors), _UPSERT_BATCH_SIZE):
@@ -225,17 +310,48 @@ def upsert_chunks(chunks: list[Chunk], embeddings: list[list[float]]) -> None:
     print(f"Upserted {len(vectors)} vectors to Pinecone.")
 
 
-def _query_source(source_name: str, embedding: list[float]) -> list[RetrievedChunk]:
+def _query_source(
+    source_name: str,
+    embedding: list[float],
+    bm25_query: str,
+) -> list[RetrievedChunk]:
     """
-    Stage 1 recall: query Pinecone for one source.
+    Stage 1 recall: hybrid query Pinecone for one source.
 
-    Uses reranker_candidate_k (not top_k) because we're building a candidate
-    pool for the reranker, not the final context window. similarity_threshold
-    acts as a noise floor — anything below it is too far from the query to be
-    worth sending to the cross-encoder.
+    Combines a dense (semantic) channel and a sparse (BM25 keyword) channel
+    in a single Pinecone query. Client-side alpha scaling:
+      - dense vector  × alpha       (e.g. 0.75)
+      - sparse values × (1−alpha)   (e.g. 0.25)
+
+    This is the standard approach for Pinecone's classic Index API, which has
+    no server-side alpha parameter. For normalised dense vectors (OpenAI
+    text-embedding-3-small outputs unit vectors), dot product = cosine
+    similarity, so the dense channel is semantically equivalent to before.
+
+    bm25_query must be the original user query (pre-diet-hint-augmentation).
+    Feeding "[Diet: Vegetarian]" to BM25 would match unrelated chunks that
+    happen to mention vegetarian diets; the diet hint is for dense only.
+
+    similarity_threshold note: the combined hybrid score is in a different
+    range than pure cosine (dense is scaled by alpha; sparse adds additional
+    signal). Recalibrate SIMILARITY_THRESHOLD if you see unexpected fallbacks.
     """
+    alpha = settings.hybrid_alpha
+
+    # Dense channel: scale by alpha so the two channels contribute proportionally.
+    scaled_dense = [v * alpha for v in embedding]
+
+    # Sparse channel: encode query, scale values by (1-alpha).
+    bm25 = _get_bm25_encoder()
+    raw_sparse = bm25.encode_queries(bm25_query)
+    scaled_sparse = {
+        "indices": raw_sparse["indices"],
+        "values": [v * (1 - alpha) for v in raw_sparse["values"]],
+    }
+
     results = get_index().query(
-        vector=embedding,
+        vector=scaled_dense,
+        sparse_vector=scaled_sparse,
         top_k=settings.reranker_candidate_k,
         filter={"org_display_name": {"$eq": source_name}},
         include_metadata=True,
@@ -316,7 +432,14 @@ def retrieve_and_rerank(query: str, profile=None) -> list[RetrievedChunk]:
     update_current_span(input={
         "query": query,
         "hyde_enabled": settings.hyde_enabled and profile is not None,
+        "hybrid_alpha": settings.hybrid_alpha,
     })
+
+    # BM25 must see the original user query, not the diet-hint suffix appended
+    # by augment_query (e.g. "Is amla safe? [Diet: Vegetarian]"). The "[Diet: X]"
+    # tag steers dense embedding toward diet-relevant chunks — BM25 doesn't
+    # benefit from it and would spuriously match chunks mentioning that diet.
+    bm25_query = query.split(" [Diet:")[0]
 
     # Stage 0: HyDE transformation, opt-in via settings + requires profile.
     if settings.hyde_enabled and profile is not None:
@@ -334,7 +457,7 @@ def retrieve_and_rerank(query: str, profile=None) -> list[RetrievedChunk]:
     all_candidates: list[RetrievedChunk] = []
     sources_hit: dict[str, int] = {}
     for source_name in priority_order():
-        source_chunks = _query_source(source_name, embedding)
+        source_chunks = _query_source(source_name, embedding, bm25_query)
         sources_hit[source_name] = len(source_chunks)
         all_candidates.extend(source_chunks)
 

@@ -10,6 +10,13 @@ langchain-text-splitters==0.3.3
 # jumps to langchain-core>=1.0.0 which conflicts with the rest of the chain.
 langchain-experimental==0.3.4
 
+# Hybrid search: BM25Encoder for sparse vector generation (paired with dense
+# OpenAI embeddings). Fitted on the full corpus at ingest time; loaded as a
+# singleton at query time. Pinecone's classic index API requires client-side
+# alpha scaling (no server-side alpha param) — see retriever.py.
+# Pin to 0.11.x — pre-1.0 library; minor bumps can rename API surfaces.
+pinecone-text>=0.11,<0.12
+
 # Cross-encoder reranking: bge-reranker-v2-m3 self-hosted via
 # sentence-transformers (instead of Pinecone Inference's hosted version).
 # Same model — but self-hosted means no per-call API rate limit (Pinecone

@@ -134,6 +134,24 @@ class Settings(BaseSettings):
     # Override per-run: CHUNK_MAX_TOKENS=400
     chunk_max_tokens: int = 512
 
+    # --- Hybrid search knobs ---
+    # Sparse (BM25) + dense (OpenAI embeddings) hybrid retrieval.
+    # The alpha parameter weights the two channels; scaling is applied
+    # client-side before the Pinecone query (the classic Index.query API has
+    # no server-side alpha parameter).
+    #   alpha=1.0 → pure dense (cosine via dotproduct on normalised vectors)
+    #   alpha=0.0 → pure sparse (BM25 keyword matching only)
+    #   alpha=0.75 → Pinecone's recommended default for RAG workloads
+    # Tunable without code change: HYBRID_ALPHA=0.5 python -m eval.ragas_eval
+    # NOTE: similarity_threshold is calibrated for cosine [0,1]. After hybrid,
+    # scores combine dense + sparse — a value near 0 may be needed if sparse
+    # signal on exact-match queries inflates previously-below-threshold chunks.
+    hybrid_alpha: float = 0.75
+    # Path (relative to PROJECT_ROOT) where the fitted BM25Encoder is saved
+    # at ingest time and loaded at query time. Fitted on the full corpus so
+    # IDF weights reflect this domain (pregnancy nutrition guidelines).
+    bm25_encoder_path: str = "data/bm25_encoder.json"
+
     # --- Classifier knobs ---
     # Triage LLM that labels each incoming message as in_scope / emergency /
     # out_of_scope before retrieval. Kept separate from llm_model so we can

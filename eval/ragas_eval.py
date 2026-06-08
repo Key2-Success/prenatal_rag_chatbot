@@ -32,6 +32,7 @@ calls per run. Budget accordingly.
 
 import argparse
 import contextvars
+import math
 import os
 import sys
 import time
@@ -486,6 +487,11 @@ def attach_scores_to_langfuse(
             try:
                 value = float(value)
             except (TypeError, ValueError):
+                continue
+            if math.isnan(value):
+                # RAGAS fills rows with nan when a judge call fails (e.g.
+                # API credit exhaustion mid-run). Langfuse rejects nan as
+                # an invalid score value (400 Bad Request) — skip silently.
                 continue
             langfuse.create_score(
                 trace_id=ac.trace_id,

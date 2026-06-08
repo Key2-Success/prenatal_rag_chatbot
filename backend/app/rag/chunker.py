@@ -27,11 +27,37 @@ Two-stage ingestion:
     few-shot examples — NOT LlamaParse. The prompt has since been corrected;
     this re-migration tests LlamaParse fairly against the current prompt.
 
-  Stage 2 — Chunk (SemanticChunker):
-    Unchanged. Splits each page's markdown into chunks at the largest topic
-    shifts (top 5% of inter-sentence embedding-distance jumps). Operates on
-    markdown text from LlamaParse, which gives cleaner sentence boundaries
-    than the soup pypdf produced — same chunker, better input.
+  Stage 2 — Header-aware sectioning (MarkdownHeaderTextSplitter):
+    Before SemanticChunker touches a page, split on markdown section headers
+    (#, ##, ###). LlamaParse normalises all PDF heading styles to these three
+    levels, so this works across MoHFW, FOGSI, and WHO sources.
+
+    Why this matters: a single page can contain an "Iron supplementation"
+    section and a "Calcium and Vitamin D" section. Without header splitting,
+    SemanticChunker may group them together when the embedding-distance gap
+    between consecutive sentences is below the 85th-percentile threshold.
+    Mixed-content chunks degrade context_precision — the LLM receives
+    irrelevant context and the RAGAS judge correctly penalises it.
+
+    Each section is prepended with its full header breadcrumb (all ancestor
+    headers + the section's own header), reconstructed from the splitter's
+    metadata. This makes every downstream chunk self-contained: a chunk
+    containing "take 60mg daily" unambiguously becomes about iron
+    supplementation once "## Iron and Folic Acid Supplementation" is
+    prepended. This is a structure-driven, zero-cost approximation of
+    Contextual Retrieval — no LLM call required at ingest.
+
+    The deepest header value is also stored as `section_heading` in Pinecone
+    metadata for use in citations and future filtering.
+
+  Stage 3 — Semantic chunking within sections (SemanticChunker):
+    Within each header section, split on topic shifts (85th-percentile
+    embedding-distance). The same model (text-embedding-3-small) is used at
+    ingest and query time so semantic proximity is consistent end-to-end.
+
+  Stage 4 — Token cap backstop (RecursiveCharacterTextSplitter):
+    Any chunk still exceeding chunk_max_tokens (512) after Stage 3 is split
+    further with token-aware sentence-boundary splitting.
 
 Design decisions:
   - LlamaParse called via the synchronous `load_data()` path. The async path
@@ -57,7 +83,7 @@ from pathlib import Path
 import tiktoken
 from langchain_experimental.text_splitter import SemanticChunker
 from langchain_openai import OpenAIEmbeddings
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 from llama_cloud_services import LlamaParse
 from pydantic import BaseModel
 
@@ -70,6 +96,53 @@ from backend.app.sources import Source, sources_by_filename
 # but it still catches "Page 12 of 47" footers etc.
 MIN_CHUNK_CHARS = 50
 
+# Stage 2: split each page on markdown headers before SemanticChunker runs.
+# strip_headers=True strips headers from page_content so they don't appear
+# twice — we reconstruct and prepend the FULL breadcrumb path in
+# _build_section_prefix() rather than just the immediate header. This ensures
+# every chunk carries its complete section context (e.g. both
+# "# Nutritional Requirements" AND "## Iron Supplementation"), not just the
+# nearest heading. LlamaParse normalises all PDF heading styles to #/##/###
+# so the splitter fires consistently across all three sources.
+_HEADER_SPLITTER = MarkdownHeaderTextSplitter(
+    headers_to_split_on=[
+        ("#", "h1"),
+        ("##", "h2"),
+        ("###", "h3"),
+    ],
+    strip_headers=True,
+)
+
+
+def _build_section_prefix(metadata: dict) -> str:
+    """
+    Reconstruct the full header breadcrumb from MarkdownHeaderTextSplitter
+    metadata and return it as a markdown-formatted prefix string.
+
+    With strip_headers=True, the splitter stores all ancestor headers in the
+    Document's metadata dict (e.g. {"h1": "Dietary Guidelines", "h2": "Iron
+    Supplementation"}). Building the full path — rather than just the
+    immediate header — ensures a chunk that says "take 60mg daily" is always
+    read as part of the iron-supplementation section, not as a free-floating
+    instruction. This is structure-driven contextual enrichment: zero LLM
+    calls, fully deterministic, and applied consistently to every chunk.
+    """
+    parts = []
+    for level, marker in [("h1", "#"), ("h2", "##"), ("h3", "###")]:
+        val = metadata.get(level, "").strip()
+        if val:
+            parts.append(f"{marker} {val}")
+    return "\n".join(parts) + "\n\n" if parts else ""
+
+
+def _deepest_heading(metadata: dict) -> str:
+    """Return the most specific header value from splitter metadata, or ''."""
+    for level in ("h3", "h2", "h1"):
+        val = metadata.get(level, "").strip()
+        if val:
+            return val
+    return ""
+
 
 class Chunk(BaseModel):
     """One unit of text ready for embedding + Pinecone upsert."""
@@ -79,7 +152,8 @@ class Chunk(BaseModel):
     doc_title: str
     doc_reference_order: int
     year_published: int
-    page_number: int  # page where this chunk begins
+    page_number: int   # page where this chunk begins
+    section_heading: str = ""  # deepest markdown header enclosing this chunk
 
 
 class _Page(BaseModel):
@@ -195,25 +269,51 @@ def _chunks_for_page(page: _Page, source: Source, splitter: SemanticChunker) -> 
     """
     Split one page's markdown into Chunks stamped with source metadata.
 
-    Two-pass splitting:
-      1. SemanticChunker — primary splitter, cuts on topic shifts.
-      2. _apply_token_cap — backstop for any chunk still over the token cap.
+    Four-pass splitting:
+      1. MarkdownHeaderTextSplitter — isolate each header section so
+         SemanticChunker never groups text from different topics.
+      2. Breadcrumb prefix — prepend the full ancestor-header path to each
+         section so every downstream chunk is self-contained.
+      3. SemanticChunker — within each enriched section, cut on topic shifts.
+      4. _apply_token_cap — backstop for any chunk still over the token cap.
+
+    Pages with no markdown headers pass through step 1 as a single section,
+    degrading gracefully to the original two-stage flow.
     """
     chunks: list[Chunk] = []
-    for raw in splitter.split_text(page.text):
-        for text in _apply_token_cap(raw.strip()):
-            text = text.strip()
-            if len(text) < MIN_CHUNK_CHARS:
-                continue
-            chunks.append(Chunk(
-                text=text,
-                source_file=source.file_name,
-                org_display_name=source.org_display_name,
-                doc_title=source.doc_title,
-                doc_reference_order=source.doc_reference_order,
-                year_published=source.doc_year_published,
-                page_number=page.page_number,
-            ))
+
+    # Stage 1: split on headers → list of per-section Documents.
+    # Each Document carries metadata {"h1": ..., "h2": ..., "h3": ...}
+    # with whatever header levels enclose it.
+    header_sections = _HEADER_SPLITTER.split_text(page.text)
+    if not header_sections:
+        return chunks  # empty page after parse — nothing to do
+
+    for section in header_sections:
+        # Stage 2: prepend full breadcrumb so every chunk knows its context.
+        prefix = _build_section_prefix(section.metadata)
+        heading = _deepest_heading(section.metadata)
+        section_text = (prefix + section.page_content).strip()
+        if not section_text:
+            continue
+
+        # Stage 3: semantic chunking within the (now self-contained) section.
+        for raw in splitter.split_text(section_text):
+            # Stage 4: token cap backstop.
+            for text in _apply_token_cap(raw.strip()):
+                text = text.strip()
+                if len(text) < MIN_CHUNK_CHARS:
+                    continue
+                chunks.append(Chunk(
+                    text=text,
+                    source_file=source.file_name,
+                    org_display_name=source.org_display_name,
+                    doc_title=source.doc_title,
+                    doc_reference_order=source.doc_reference_order,
+                    year_published=source.doc_year_published,
+                    page_number=page.page_number,
+                    section_heading=heading,
+                ))
     return chunks
 
 

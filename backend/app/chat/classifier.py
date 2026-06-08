@@ -67,6 +67,8 @@ class ClassificationResult(BaseModel):
 #  - "When in doubt, prefer in_scope" biases the classifier toward letting
 #    the answer LLM handle ambiguous cases — its system prompt also enforces
 #    scope, so we don't need to be over-aggressive here.
+PROMPT_VERSION = "v1.0"
+
 _SYSTEM_PROMPT = """You are a triage classifier for Poshan Saathi, a prenatal nutrition chatbot serving pregnant women in India.
 
 Classify the user's message into exactly one of three labels:
@@ -108,7 +110,7 @@ def classify_message(message: str) -> MessageClassification:
     """
     # Set explicit input on the span instead of letting @observe capture
     # the function args (per Langfuse skill best practice).
-    update_current_span(input={"message": message})
+    update_current_span(input={"message": message, "prompt_version": PROMPT_VERSION})
     try:
         completion = get_openai_client().beta.chat.completions.parse(
             model=settings.classifier_model,

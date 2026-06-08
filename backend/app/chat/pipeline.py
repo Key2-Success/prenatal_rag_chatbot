@@ -66,6 +66,10 @@ from backend.app.rag.retriever import RetrievedChunk, retrieve_and_rerank
 #   - Trimester handling (moved to TrimesterRule.to_prompt_rule).
 #   - Few-shot examples (removed in previous iteration — taught
 #     bureaucratic style globally).
+# Bump whenever the system prompt changes so Langfuse traces can be filtered
+# and compared by prompt version — same pattern as validator.py / hyde.py.
+PROMPT_VERSION = "v1.1"
+
 SYSTEM_PROMPT = """You are Poshan Saathi, a warm and caring pregnancy nutrition companion for women in India.
 
 You will receive context excerpts from vetted nutrition guidelines (MoHFW, FOGSI, WHO). Your answers must be grounded in that context only.
@@ -77,6 +81,7 @@ ALLOWED inferences (these preserve faithfulness):
 - The context recommends food X → X is safe and beneficial for pregnancy.
 - The context lists X "such as" Y, Z → Y and Z are examples of X.
 - The context says "during pregnancy" → the advice applies to the user.
+- The context has supplement data but the question asks about food sources → give the supplement recommendation, briefly noting it covers supplements rather than food sources. Leading with what the context contains is always correct.
 
 FORBIDDEN (these are hallucination, even if well-intentioned):
 - Answering a different topic than what was asked, even if that topic appears in the context.
@@ -88,9 +93,10 @@ Example — Q: "Is amla safe during pregnancy?", Context: "Adding vitamin C rich
 ✓ Correct: "Yes, amla is recommended as part of a pregnancy diet. It's a vitamin C-rich food that improves iron absorption."
 ✗ Wrong: "The context does not explicitly state whether amla is safe."
 
-Example — Q: "What foods are good sources of folic acid?", Context: discusses folic acid supplements but NO folic acid food sources:
-✓ Correct: "The guidelines focus on folic acid supplementation rather than specific food sources."
-✗ Wrong: "Foods rich in vitamin A such as..." (substituting unrelated content)
+Example — Q: "What foods are rich in vitamin B12?", Context: recommends vitamin B12 supplementation for at-risk women but does NOT list any food sources:
+✓ Correct: "The guidelines recommend a daily vitamin B12 supplement for women who may be deficient, though specific food sources are not covered."
+✗ Wrong: "The guidelines focus on vitamin B12 supplementation rather than specific food sources." (opens with the gap, not the substance — violates LEAD WITH SUBSTANCE)
+✗ Wrong: "Dairy products and meat are rich in vitamin B12..." (not stated in the context — hallucination)
 
 LEAD WITH SUBSTANCE:
 - Start with what the context DOES contain. Never open with what it DOESN'T.
@@ -167,7 +173,9 @@ def _build_user_message(profile: UserProfile, context: str, question: str) -> st
         f"Context from trusted guidelines:\n{context}\n\n"
         f"Question: {question}\n\n"
         "Answer using only the context above. "
-        "If the answer is not explicitly stated in the context, say so."
+        "If the context contains no relevant information at all, say so — "
+        "but if it contains related content (such as supplementation data for "
+        "a food-source question), lead with that rather than saying the answer is absent."
     )
 
 
@@ -183,6 +191,7 @@ def _call_llm(profile: UserProfile, chunks: list[RetrievedChunk], question: str)
         "retrieved_pages": [
             f"{c.org_display_name} p.{c.page_number}" for c in chunks
         ],
+        "prompt_version": PROMPT_VERSION,
     })
     response = get_openai_client().chat.completions.create(
         model=settings.llm_model,

@@ -43,3 +43,6 @@ out/
 
 # Eval run artifacts (generated locally; don't churn the repo)
 eval/results/
+
+# Generated ingest artifacts — re-created by `python -m scripts.ingest`
+data/bm25_encoder.json

@@ -393,6 +393,58 @@ def _dedup_by_text(chunks: list[RetrievedChunk]) -> list[RetrievedChunk]:
     return unique
 
 
+def _build_reranker_query(base_query: str, profile) -> str:
+    """
+    Build a natural-language reranker query that embeds profile constraints
+    as prose so the cross-encoder's attention mechanism can contrast them
+    directly against chunk content word by word.
+
+    Why a different format for each retrieval channel:
+      - Dense embedding:  augmented with "[Diet: X]" tag → steers the vector
+                          toward diet-relevant regions of embedding space.
+      - BM25:             raw query only → avoids spurious keyword matches on
+                          the diet tag itself (e.g. "Vegetarian" hitting chunks
+                          that discuss vegetarian diets for unrelated reasons).
+      - Cross-encoder:    full prose description → gives the attention mechanism
+                          explicit constraint tokens ("no meat", "no poultry")
+                          to attend against chunk content ("beef liver",
+                          "chicken curry"). A two-word tag like "[Diet: Vegetarian]"
+                          is too weak to override a strong topical match on
+                          "iron sources" from a meat-focused chunk.
+
+    Example output for a vegetarian user with no conditions in week 20:
+      "vegetarian (no meat, poultry, fish, or eggs) pregnant woman with no
+       medical conditions (second trimester): iron food sources"
+
+    This makes the chunk about beef liver actively conflict with the query
+    at the token level, which the cross-encoder correctly penalises.
+    """
+    if profile is None:
+        return base_query
+
+    diet_phrase = {
+        "vegetarian": "vegetarian (no meat, poultry, fish, or eggs)",
+        "ovo_vegetarian": "ovo-vegetarian (no meat, poultry, or fish; eggs allowed)",
+        "non_vegetarian": "non-vegetarian",
+    }[profile.diet_type.name]
+
+    week = profile.pregnancy_week
+    if week <= 12:
+        trimester = "first trimester"
+    elif week <= 26:
+        trimester = "second trimester"
+    else:
+        trimester = "third trimester"
+
+    if profile.medical_conditions:
+        conditions = " and ".join(c.value.lower() for c in profile.medical_conditions)
+        health_phrase = f"with {conditions}"
+    else:
+        health_phrase = "with no medical conditions"
+
+    return f"{diet_phrase} pregnant woman {health_phrase} ({trimester}): {base_query}"
+
+
 @observe(name="retrieve_and_rerank")
 def retrieve_and_rerank(query: str, profile=None) -> list[RetrievedChunk]:
     """
@@ -483,7 +535,12 @@ def retrieve_and_rerank(query: str, profile=None) -> list[RetrievedChunk]:
     # --parallel-runs. Reranker work is ~13s of a ~5min eval, so this
     # serialisation costs little but prevents hangs.
     reranker = _get_reranker()
-    pairs = [(query, c.text) for c in all_candidates]
+    # Build a profile-aware reranker query in natural prose so the cross-encoder
+    # can attend dietary/medical constraints directly against chunk tokens.
+    # Uses bm25_query (the clean, tag-stripped query) as the base — the [Diet: X]
+    # tag was for the embedding channel only, not for cross-encoder input.
+    reranker_query = _build_reranker_query(bm25_query, profile)
+    pairs = [(reranker_query, c.text) for c in all_candidates]
     with _reranker_lock:
         raw_scores = reranker.predict(pairs)
     scores = 1.0 / (1.0 + np.exp(-np.asarray(raw_scores)))  # sigmoid

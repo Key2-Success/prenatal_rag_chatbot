@@ -56,10 +56,16 @@
 
 - id: water_intake
   category: core_nutrition
+  # The corpus has no water-intake guidance (only a GDM glucose-test mention
+  # of water). The honest behaviour is no_results, not a fabricated answer —
+  # the grounding validator strips the ungrounded hydration claim, leaving
+  # nothing, which the pipeline routes to NO_RESULTS_RESPONSE. This is a
+  # routing assertion (Layer 1), not a RAGAS answer-quality case. Future
+  # iteration: ingest documents covering hydration to make this answerable.
   query: "How many glasses of water should I drink each day?"
   profile: priya
   expected:
-    behavior: answer
+    behavior: no_results
 
 # ---------- B. Personalization (6) ----------
 # Two slices of personalization, mirroring the schema in models/schemas.py:

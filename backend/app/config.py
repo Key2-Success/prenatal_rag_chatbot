@@ -94,7 +94,29 @@ class Settings(BaseSettings):
     # --- LLM knobs ---
     llm_model: str = "gpt-4.1-nano"
     # Lower temperature = more consistent, factual answers (good for medical).
+    # Tried 0.1 to reduce "creative gap-filling," but the eval showed it made
+    # BOTH faithfulness AND context_precision worse — so 0.3 stays. The
+    # hallucination problem is a grounding problem, not a sampling-randomness
+    # problem; it needs a hard post-generation grounding check, not a lower
+    # temperature. Keep at 0.3.
     llm_temperature: float = 0.3
+
+    # --- Grounding validator knobs ---
+    # Hard post-generation faithfulness check. The answer model's system
+    # prompt has FORBIDDEN rules against ungrounded claims, but those are
+    # soft constraints it bypasses ~regularly — the same situation diet and
+    # deflective-opener rules were in before they moved to the deterministic
+    # validator. check_grounding decomposes the answer into atomic claims,
+    # verifies each against the retrieved context, and drops the unsupported
+    # ones. Unlike the diet/opener checks there's no cheap regex/profile gate,
+    # so this is an always-on LLM call per answer (acceptable for an eval
+    # suite). Disable to A/B in eval: VALIDATOR_GROUNDING_ENABLED=false.
+    validator_grounding_enabled: bool = True
+    # Judge model. Deliberately STRONGER than llm_model (gpt-4.1-nano):
+    # detecting an ungrounded claim is harder than generating one, and the
+    # nano model grading its own output is the weakest possible judge.
+    # Override per-run: VALIDATOR_GROUNDING_MODEL=gpt-4.1-nano (cost parity A/B).
+    validator_grounding_model: str = "gpt-4.1-mini"
 
     # --- HyDE knobs ---
     # HyDE (Hypothetical Document Embeddings) transforms the query before

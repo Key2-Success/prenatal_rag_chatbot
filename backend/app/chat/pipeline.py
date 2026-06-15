@@ -289,19 +289,50 @@ def run_chat(
     # 4. Generate the answer.
     answer = _call_llm(profile, chunks, request.message)
 
-    # 5. Validate-and-fix against the user's dietary restrictions.
-    #    Short-circuits to zero LLM cost when no restrictions apply
-    #    (non-vegetarian with no hypertension/diabetes). When restrictions
-    #    DO apply, the validator detects violations AND returns a corrected
-    #    version in one LLM call — we don't run the answer LLM twice.
+    from backend.app.chat.validator import check_grounding, validate_and_fix
+
+    # 5. Grounding check (faithfulness backstop). Decomposes the answer into
+    #    atomic claims, verifies each against the SAME context the answer LLM
+    #    saw, and drops unsupported ones. Runs BEFORE the diet/opener validator
+    #    because dropping an ungrounded claim can leave a deflective remnant
+    #    ("the context doesn't mention X") that the opener/trailing pass below
+    #    then strips. Reverse order wouldn't catch that.
+    grounding = check_grounding(answer, _format_context(chunks))
+
+    # 5a. If grounding stripped the answer to nothing (no claim survived as
+    #     grounded), the corpus didn't actually answer this question — emit the
+    #     honest no_results response instead of a fabrication. Skipping
+    #     validate_and_fix here is deliberate: its opener-rewriter would try to
+    #     "lead with substance" a deflection-only answer doesn't have, and
+    #     invent some. Routing to no_results is the correct behaviour and is
+    #     scored by the eval's routing layer (not RAGAS answer-quality).
+    if not grounding.corrected_answer.strip():
+        update_current_span(
+            output={
+                "response_type": ResponseType.no_results.value,
+                "answer": NO_RESULTS_RESPONSE,
+                "grounding_corrected": True,
+                "grounding_stripped_to_empty": True,
+            },
+        )
+        return ChatResponse(
+            response_type=ResponseType.no_results,
+            answer=NO_RESULTS_RESPONSE,
+        )
+    answer = grounding.corrected_answer
+
+    # 6. Validate-and-fix against the user's dietary restrictions + deflective
+    #    openers. Short-circuits to zero LLM cost when no restrictions apply
+    #    (non-vegetarian with no hypertension/diabetes) and the answer opens
+    #    cleanly. When something DOES apply, the validator detects violations
+    #    AND returns a corrected version in one LLM call.
     #    See backend/app/chat/validator.py for the full design rationale.
-    from backend.app.chat.validator import validate_and_fix
     validation = validate_and_fix(answer, profile)
     answer = validation.corrected_answer
 
-    # 6. Update the chat span with the final answer (post-validation, post-
-    # correction). The validator's own @observe span carries the original
-    # answer + violations metadata for diffing in the Langfuse trace.
+    # 7. Update the chat span with the final answer (post-grounding, post-
+    # validation). The check_grounding and validate_and_fix spans each carry
+    # their own original answer + violation/claim metadata for diffing.
     update_current_span(
         output={
             "response_type": ResponseType.answer.value,
@@ -309,6 +340,7 @@ def run_chat(
             "sources": [
                 f"{c.org_display_name} p.{c.page_number}" for c in chunks
             ],
+            "grounding_corrected": not grounding.is_grounded,
             "validator_corrected": not validation.is_compliant,
         },
     )

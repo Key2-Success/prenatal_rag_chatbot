@@ -33,9 +33,13 @@
   expected:
     behavior: answer
 
-- id: folic_acid_sources
+- id: folic_acid_intake
   category: core_nutrition
-  query: "What foods are good sources of folic acid?"
+  # The corpus covers folic acid as a supplement/amount (WHO: 0.4 mg/day),
+  # not as food sources — it names no folate-rich foods. So we ask the
+  # answerable question (how much) rather than the unanswerable one (which
+  # foods), which would route to no_results like water_intake / paneer_intake.
+  query: "How much folic acid do I need during pregnancy?"
   profile: sunita
   expected:
     behavior: answer
@@ -133,10 +137,18 @@
 
 - id: paneer_intake
   category: indian_context
+  # The corpus names paneer as a protein source but gives no per-day quantity
+  # guidance. The honest behaviour is no_results, not a fabricated amount —
+  # the answer LLM either hallucinates a "serving" (stripped by the grounding
+  # validator) or truthfully reports the gap ("the guidelines do not specify
+  # an exact amount"), which is itself a non-answer. Both routes collapse to
+  # NO_RESULTS_RESPONSE. This is a routing assertion (Layer 1), parallel to
+  # water_intake. Future iteration: ingest a document with per-day dairy/paneer
+  # serving guidance to make the quantity answerable.
   query: "How much paneer can I have in a day?"
   profile: priya            # vegetarian — paneer is a key protein source
   expected:
-    behavior: answer
+    behavior: no_results
 
 - id: amla_pregnancy
   category: indian_context

@@ -39,9 +39,10 @@ from backend.app.observability import observe, update_current_span
 
 PROMPT_VERSION = "v2.2"  # v2.2: added embedded quantitative-hedge detection + rule
 
-# Versioned independently of PROMPT_VERSION above — check_grounding is a
+# Versioned independently of PROMPT_VERSION above — review_answer is a
 # separate LLM call with its own prompt, so its version moves on its own.
-GROUNDING_PROMPT_VERSION = "v1.0"
+# v2.0: merged answerability judgment into the faithfulness pass (one call).
+REVIEW_PROMPT_VERSION = "v2.0"
 
 # Forbidden opener patterns. Regex used ONLY to decide whether to invoke
 # the LLM rewriter — NOT to classify or filter content (where LLM judgement
@@ -401,17 +402,28 @@ def validate_and_fix(answer: str, profile: UserProfile) -> ValidationResult:
     return result
 
 
-# --- Grounding validator (faithfulness backstop) -----------------------------
+# --- Answer review (faithfulness + answerability) ----------------------------
 #
-# Why this is a SEPARATE function/call from validate_and_fix:
-#   - It needs an input validate_and_fix never sees: the retrieved context.
-#   - Its method is different — RAGAS-style claim decomposition, not a
-#     single-pass rewrite — so a shared mega-prompt would dilute both jobs.
-#   - It has no cheap deterministic gate. diet/opener/trailing each have a
-#     near-free pre-check (profile lookup / regex) that lets validate_and_fix
-#     make ZERO LLM calls in the common case. "Is this claim grounded?" can
-#     only be answered by an LLM reading the context, so this is an always-on
-#     call per answer. The only gate is the enabled/disabled config flag.
+# This is ONE LLM call that judges the answer on two orthogonal axes that both
+# read the answer against a reference:
+#   1. Faithfulness — is every claim grounded in the retrieved CONTEXT?
+#      (RAGAS-style claim decomposition; corrects by dropping unsupported parts.)
+#   2. Answerability — does the SURVIVING grounded answer actually deliver the
+#      specific information the QUESTION asks for? A faithful but off-question
+#      answer (e.g. the corpus mentions a topic but never the quantity asked)
+#      should route to no_results, which pure faithfulness can't force.
+#
+# Why these two share a call but validate_and_fix stays separate:
+#   - Both are "judge the answer against a reference" tasks and both want the
+#     STRONGER mini judge — folding them is near-free (answerability adds only
+#     the question + one boolean). validate_and_fix is a profile-safety REWRITE
+#     on the nano model with cheap deterministic pre-gates; merging it would
+#     force it onto mini, collapse two independent rewrites into one, and lose
+#     its zero-LLM-call common case. So: 2 calls, not 1 or 3.
+#   - This call has no cheap deterministic gate. "Is this claim grounded?" /
+#     "does this answer the question?" can only be answered by an LLM reading
+#     the context, so it's always-on per answer. The only gate is the
+#     enabled/disabled config flag.
 #
 # Why a STRONGER judge model (settings.validator_grounding_model, default
 # gpt-4.1-mini) than the nano answer model: detecting an ungrounded claim is
@@ -443,9 +455,9 @@ class _ClaimVerdict(BaseModel):
     )
 
 
-class GroundingResult(BaseModel):
+class AnswerReview(BaseModel):
     """
-    Output of check_grounding.
+    Output of review_answer (faithfulness + answerability).
 
     is_grounded: True if EVERY claim in the answer is grounded.
     claims: per-claim decomposition + verdicts (also useful for tracing).
@@ -454,13 +466,21 @@ class GroundingResult(BaseModel):
       IMPORTANT: when is_grounded=True, this field is set to the ORIGINAL
       answer by the calling code, NOT by the LLM — same no-echo-trust safety
       as ValidationResult. The LLM only rewrites when claims are ungrounded.
+
+    answers_question: True if the SURVIVING grounded answer delivers the
+      specific information the question asks for. Judged on the corrected
+      answer (post-strip). False routes to no_results (gated by config).
+    answerability_note: one-line reasoning for the answerability verdict
+      (tracing only).
     """
     is_grounded: bool
     claims: list[_ClaimVerdict]
     corrected_answer: str
+    answers_question: bool
+    answerability_note: str
 
 
-_GROUNDING_SYSTEM_PROMPT = """You are a faithfulness checker for a pregnancy-nutrition assistant. You decide whether an ANSWER is fully grounded in the provided CONTEXT, and when it is not, you produce a corrected answer with the unsupported parts removed.
+_REVIEW_SYSTEM_PROMPT = """You are a reviewer for a pregnancy-nutrition assistant. You judge an ANSWER on two axes: (1) is it fully grounded in the provided CONTEXT, and (2) does it actually answer the QUESTION. When the answer is not grounded, you produce a corrected answer with the unsupported parts removed.
 
 METHOD (follow it exactly — do not judge by overall impression):
   1. Decompose the answer into atomic claims — one simple factual statement each. A sentence with two facts becomes two claims.
@@ -489,10 +509,18 @@ CORRECTION (only when is_grounded is false):
   - Preserve the original voice, tone, and length of what remains.
   - If, after removing every ungrounded claim, the ONLY thing left would be a deflection (see above) or nothing at all, then the answer had no grounded content to begin with. In that case set corrected_answer to the EMPTY STRING "" — do NOT keep the deflection, and do NOT invent a replacement. The calling code converts an empty result into an honest "I don't have that information" response.
 
+ANSWERABILITY (judge this on the answer AS IT WILL STAND after your corrections — i.e. the grounded content that remains; if everything is grounded, the whole answer):
+  Identify the specific thing the QUESTION asks for (a quantity, a list of foods, a yes/no with reason, etc.). Then decide whether the remaining grounded answer actually delivers it.
+  - answers_question is TRUE when the answer provides what was asked, even partially or in general terms. Default to TRUE — be lenient. A direct, on-topic answer counts even if it is brief or could say more.
+  - answers_question is FALSE only when the answer clearly fails to deliver the specific thing asked: it discusses the surrounding topic but omits the actual ask. Example: the question asks HOW MUCH of something per day and the answer only names what to consume without any amount → it does not answer the question. Example: the question asks WHICH foods provide a nutrient and the answer only discusses a supplement or a general diet without naming any such food → it does not answer the question.
+  When in doubt, choose TRUE. Only the clear non-answers above should be FALSE.
+
 OUTPUT:
   - is_grounded: true only if every claim is grounded.
   - claims: the decomposition with per-claim grounded/evidence.
   - corrected_answer: when is_grounded is true, set this to the EMPTY STRING "" — the calling code reuses the original answer, so do NOT echo it. When is_grounded is false, set it to the corrected text, OR the empty string "" if nothing grounded remains (see CORRECTION).
+  - answers_question: true/false per ANSWERABILITY above, judged on the answer that remains after correction.
+  - answerability_note: one short sentence naming what the question asked for and whether the answer delivered it.
 """
 
 
@@ -515,14 +543,18 @@ def _is_pure_deflection(text: str) -> bool:
     )
 
 
-@observe(name="check_grounding")
-def check_grounding(answer: str, context: str) -> GroundingResult:
+@observe(name="review_answer")
+def review_answer(answer: str, context: str, question: str) -> AnswerReview:
     """
-    Verify that every claim in `answer` is grounded in `context`, and return
-    a (possibly corrected) version with unsupported claims removed.
+    Review `answer` on two axes in a single LLM call:
+      - faithfulness: every claim grounded in `context` (corrects by dropping
+        unsupported parts);
+      - answerability: the surviving grounded answer delivers what `question`
+        asks for.
 
     `context` is the SAME formatted context string the answer LLM saw — the
-    judge evaluates against exactly what the model was shown.
+    judge evaluates against exactly what the model was shown. `question` is the
+    original user message.
 
     Gate: when settings.validator_grounding_enabled is False, returns the
     original answer with zero LLM calls (used to A/B the feature in eval).
@@ -540,34 +572,38 @@ def check_grounding(answer: str, context: str) -> GroundingResult:
     """
     if not settings.validator_grounding_enabled:
         update_current_span(
-            metadata={"grounding_skipped": "disabled"},
-            output={"is_grounded": True, "corrected": False},
+            metadata={"review_skipped": "disabled"},
+            output={"is_grounded": True, "answers_question": True, "corrected": False},
         )
-        return GroundingResult(
+        return AnswerReview(
             is_grounded=True, claims=[], corrected_answer=answer,
+            answers_question=True, answerability_note="review disabled",
         )
 
     update_current_span(input={
         "original_answer": answer,
+        "question": question,
         "judge_model": settings.validator_grounding_model,
-        "prompt_version": GROUNDING_PROMPT_VERSION,
+        "prompt_version": REVIEW_PROMPT_VERSION,
     })
 
     response = get_openai_client().beta.chat.completions.parse(
         model=settings.validator_grounding_model,
         temperature=0,
         messages=[
-            {"role": "system", "content": _GROUNDING_SYSTEM_PROMPT},
+            {"role": "system", "content": _REVIEW_SYSTEM_PROMPT},
             {"role": "user", "content": (
-                "CONTEXT:\n" + context + "\n\nANSWER:\n" + answer
+                "QUESTION:\n" + question
+                + "\n\nCONTEXT:\n" + context
+                + "\n\nANSWER:\n" + answer
             )},
         ],
-        response_format=GroundingResult,
+        response_format=AnswerReview,
     )
     raw = response.choices[0].message.parsed
     if raw is None:
         raise RuntimeError(
-            "Grounding checker returned None — structured output parse failed."
+            "Answer reviewer returned None — structured output parse failed."
         )
 
     # No-op safety: CODE owns the echo when grounded. When ungrounded, use the
@@ -586,10 +622,12 @@ def check_grounding(answer: str, context: str) -> GroundingResult:
         else:
             final_answer = rewritten
 
-    result = GroundingResult(
+    result = AnswerReview(
         is_grounded=raw.is_grounded,
         claims=list(raw.claims),
         corrected_answer=final_answer,
+        answers_question=raw.answers_question,
+        answerability_note=raw.answerability_note,
     )
 
     n_ungrounded = sum(1 for c in result.claims if not c.grounded)
@@ -597,11 +635,13 @@ def check_grounding(answer: str, context: str) -> GroundingResult:
         output={
             "is_grounded": result.is_grounded,
             "corrected_answer": result.corrected_answer,
+            "answers_question": result.answers_question,
         },
         metadata={
             "n_claims": len(result.claims),
             "n_ungrounded": n_ungrounded,
             "answer_changed": result.corrected_answer != answer,
+            "answerability_note": result.answerability_note,
             "claims": [c.model_dump() for c in result.claims],
         },
     )

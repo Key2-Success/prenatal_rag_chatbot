@@ -289,37 +289,47 @@ def run_chat(
     # 4. Generate the answer.
     answer = _call_llm(profile, chunks, request.message)
 
-    from backend.app.chat.validator import check_grounding, validate_and_fix
+    from backend.app.chat.validator import review_answer, validate_and_fix
 
-    # 5. Grounding check (faithfulness backstop). Decomposes the answer into
-    #    atomic claims, verifies each against the SAME context the answer LLM
-    #    saw, and drops unsupported ones. Runs BEFORE the diet/opener validator
-    #    because dropping an ungrounded claim can leave a deflective remnant
-    #    ("the context doesn't mention X") that the opener/trailing pass below
-    #    then strips. Reverse order wouldn't catch that.
-    grounding = check_grounding(answer, _format_context(chunks))
+    # 5. Answer review (faithfulness + answerability, one LLM call). Decomposes
+    #    the answer into atomic claims, verifies each against the SAME context
+    #    the answer LLM saw, drops unsupported ones, AND judges whether the
+    #    surviving answer addresses the question. Runs BEFORE the diet/opener
+    #    validator because dropping an ungrounded claim can leave a deflective
+    #    remnant ("the context doesn't mention X") that the opener/trailing pass
+    #    below then strips. Reverse order wouldn't catch that.
+    review = review_answer(answer, _format_context(chunks), request.message)
 
-    # 5a. If grounding stripped the answer to nothing (no claim survived as
-    #     grounded), the corpus didn't actually answer this question — emit the
-    #     honest no_results response instead of a fabrication. Skipping
-    #     validate_and_fix here is deliberate: its opener-rewriter would try to
-    #     "lead with substance" a deflection-only answer doesn't have, and
-    #     invent some. Routing to no_results is the correct behaviour and is
-    #     scored by the eval's routing layer (not RAGAS answer-quality).
-    if not grounding.corrected_answer.strip():
+    # 5a. Route to no_results when EITHER gate says the corpus didn't really
+    #     answer this question:
+    #       - grounding stripped the answer to nothing (no claim survived), or
+    #       - the surviving answer is faithful but off-question (answers_question
+    #         is false — e.g. corpus names a topic but never the quantity asked).
+    #     Either way, emit the honest no_results instead of a fabrication.
+    #     Skipping validate_and_fix here is deliberate: its opener-rewriter would
+    #     try to "lead with substance" an answer that doesn't have it, and invent
+    #     some. Routing to no_results is the correct behaviour and is scored by
+    #     the eval's routing layer (not RAGAS answer-quality).
+    stripped_empty = not review.corrected_answer.strip()
+    unanswerable = (
+        settings.validator_answerability_enabled and not review.answers_question
+    )
+    if stripped_empty or unanswerable:
         update_current_span(
             output={
                 "response_type": ResponseType.no_results.value,
                 "answer": NO_RESULTS_RESPONSE,
-                "grounding_corrected": True,
-                "grounding_stripped_to_empty": True,
+                "review_corrected": True,
+                "stripped_to_empty": stripped_empty,
+                "unanswerable": unanswerable,
+                "answerability_note": review.answerability_note,
             },
         )
         return ChatResponse(
             response_type=ResponseType.no_results,
             answer=NO_RESULTS_RESPONSE,
         )
-    answer = grounding.corrected_answer
+    answer = review.corrected_answer
 
     # 6. Validate-and-fix against the user's dietary restrictions + deflective
     #    openers. Short-circuits to zero LLM cost when no restrictions apply
@@ -330,8 +340,8 @@ def run_chat(
     validation = validate_and_fix(answer, profile)
     answer = validation.corrected_answer
 
-    # 7. Update the chat span with the final answer (post-grounding, post-
-    # validation). The check_grounding and validate_and_fix spans each carry
+    # 7. Update the chat span with the final answer (post-review, post-
+    # validation). The review_answer and validate_and_fix spans each carry
     # their own original answer + violation/claim metadata for diffing.
     update_current_span(
         output={
@@ -340,7 +350,8 @@ def run_chat(
             "sources": [
                 f"{c.org_display_name} p.{c.page_number}" for c in chunks
             ],
-            "grounding_corrected": not grounding.is_grounded,
+            "review_corrected": not review.is_grounded,
+            "answers_question": review.answers_question,
             "validator_corrected": not validation.is_compliant,
         },
     )

@@ -68,7 +68,7 @@ from backend.app.rag.retriever import RetrievedChunk, retrieve_and_rerank
 #     bureaucratic style globally).
 # Bump whenever the system prompt changes so Langfuse traces can be filtered
 # and compared by prompt version — same pattern as validator.py / hyde.py.
-PROMPT_VERSION = "v1.2"
+PROMPT_VERSION = "v1.4"
 
 SYSTEM_PROMPT = """You are Poshan Saathi, a warm and caring pregnancy nutrition companion for women in India.
 
@@ -108,12 +108,14 @@ LEAD WITH SUBSTANCE:
 - If the context has nothing relevant: "I don't have that specific information in my guidelines — please check with your doctor or midwife."
 - An automated validator post-checks every answer and rewrites forbidden deflective openers.
 
-QUANTITATIVE ANSWERS — servings, portions, frequencies, and ranges are all specific answers; do not hedge when they are present. Only add a "guidelines don't specify" caveat when the context has genuinely no quantitative guidance at all.
+QUANTITATIVE ANSWERS — servings, portions, frequencies, and ranges are all specific answers; do not hedge when they are present. Only add a "guidelines don't specify" caveat when the context has genuinely no quantitative guidance at all. State quantities and durations in the context's own units and time expressions — do not convert a duration into a frequency or a frequency into a duration, and do not restate a figure in units the source did not use. Paraphrasing a measured value into an unstated one is a hallucination even when clinically equivalent.
 
 PROFILE-AWARE GUIDANCE:
 The user's profile (diet, medical conditions, trimester) appears at the top of every user message as a bulleted personalisation block. Apply EVERY rule in that block. Diet exclusions are non-negotiable: silently omit any food that doesn't fit — do not list it, do not explain the omission.
 
 RESPONSE GUIDELINES:
+- You MAY state the meal structure the context provides — how many main meals and snacks, and the names of those meals if the context names them — and the food groups it recommends. You may NOT map a specific food to a specific meal or occasion when the context does not make that mapping itself. The context listing food groups AND, separately, naming the meals does not license placing a given food at a given meal — that pairing is your synthesis, not the source's. When asked for a meal-by-meal plan the context does not give, state the meal structure and the food groups to include across the day, and stop there — do not assign foods to individual meals yourself. The question's framing does not license a more specific answer than the source supports.
+- Do not append a generic benefit or purpose closer that the context does not state — phrases like "for a healthy pregnancy", "to support overall wellbeing", or "which helps your baby grow" tacked onto the end of a recommendation. State what to eat or do; name a benefit, purpose, or outcome ONLY when the context explicitly attaches it to that item. An unsourced closing flourish reads warm but is a hallucination — the post-answer reviewer strips it, which can leave your reply abruptly truncated. End on the grounded recommendation instead.
 - Only address nutrition and antenatal care questions.
 - Do not provide diagnoses or treatment decisions.
 - Do not end with closers like "consult your healthcare provider" or "always follow your doctor's advice."
@@ -289,31 +291,36 @@ def run_chat(
     # 4. Generate the answer.
     answer = _call_llm(profile, chunks, request.message)
 
-    from backend.app.chat.validator import review_answer, validate_and_fix
+    from backend.app.chat.validator import (
+        check_answerability,
+        review_answer,
+        validate_and_fix,
+    )
 
-    # 5. Answer review (faithfulness + answerability, one LLM call). Decomposes
-    #    the answer into atomic claims, verifies each against the SAME context
-    #    the answer LLM saw, drops unsupported ones, AND judges whether the
-    #    surviving answer addresses the question. Runs BEFORE the diet/opener
-    #    validator because dropping an ungrounded claim can leave a deflective
-    #    remnant ("the context doesn't mention X") that the opener/trailing pass
-    #    below then strips. Reverse order wouldn't catch that.
+    # 5. Answer review (faithfulness, one LLM call). Decomposes the answer into
+    #    atomic claims, verifies each against the SAME context the answer LLM
+    #    saw, and drops unsupported ones. Runs BEFORE the diet/opener validator
+    #    because dropping an ungrounded claim can leave a deflective remnant
+    #    ("the context doesn't mention X") that the opener/trailing pass below
+    #    then strips. Reverse order wouldn't catch that. (Answerability is judged
+    #    separately by the deterministic check_answerability gate in 5a.)
     review = review_answer(answer, _format_context(chunks), request.message)
 
     # 5a. Route to no_results when EITHER gate says the corpus didn't really
     #     answer this question:
     #       - grounding stripped the answer to nothing (no claim survived), or
-    #       - the surviving answer is faithful but off-question (answers_question
-    #         is false — e.g. corpus names a topic but never the quantity asked).
+    #       - a quantity question came back with no quantity (deterministic
+    #         check_answerability — e.g. "how much water?" answered by listing
+    #         beverages with no amount). This replaced the old LLM answerability
+    #         verdict, which was non-deterministic at temperature 0.
     #     Either way, emit the honest no_results instead of a fabrication.
     #     Skipping validate_and_fix here is deliberate: its opener-rewriter would
     #     try to "lead with substance" an answer that doesn't have it, and invent
     #     some. Routing to no_results is the correct behaviour and is scored by
     #     the eval's routing layer (not RAGAS answer-quality).
     stripped_empty = not review.corrected_answer.strip()
-    unanswerable = (
-        settings.validator_answerability_enabled and not review.answers_question
-    )
+    answerable = check_answerability(request.message, review.corrected_answer)
+    unanswerable = settings.validator_answerability_enabled and not answerable
     if stripped_empty or unanswerable:
         update_current_span(
             output={
@@ -322,7 +329,6 @@ def run_chat(
                 "review_corrected": True,
                 "stripped_to_empty": stripped_empty,
                 "unanswerable": unanswerable,
-                "answerability_note": review.answerability_note,
             },
         )
         return ChatResponse(
@@ -351,7 +357,7 @@ def run_chat(
                 f"{c.org_display_name} p.{c.page_number}" for c in chunks
             ],
             "review_corrected": not review.is_grounded,
-            "answers_question": review.answers_question,
+            "answers_question": answerable,
             "validator_corrected": not validation.is_compliant,
         },
     )

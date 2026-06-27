@@ -101,30 +101,27 @@ class Settings(BaseSettings):
     # temperature. Keep at 0.3.
     llm_temperature: float = 0.3
 
-    # --- Answer review knobs (faithfulness + answerability) ---
+    # --- Answer review knobs (faithfulness) ---
     # Hard post-generation review. The answer model's system prompt has
     # FORBIDDEN rules against ungrounded claims, but those are soft constraints
     # it bypasses ~regularly — the same situation diet and deflective-opener
     # rules were in before they moved to the deterministic validator.
     # review_answer decomposes the answer into atomic claims, verifies each
-    # against the retrieved context, drops the unsupported ones, AND judges
-    # whether the surviving answer actually addresses the question (one call).
+    # against the retrieved context, and drops the unsupported ones (one call).
     # Unlike the diet/opener checks there's no cheap regex/profile gate, so this
     # is an always-on LLM call per answer (acceptable for an eval suite).
-    # Disable to A/B in eval: VALIDATOR_GROUNDING_ENABLED=false (gates the whole
-    # review call — both faithfulness and answerability detection).
+    # Disable to A/B in eval: VALIDATOR_GROUNDING_ENABLED=false.
     validator_grounding_enabled: bool = True
     # Judge model. Deliberately STRONGER than llm_model (gpt-4.1-nano):
     # detecting an ungrounded claim is harder than generating one, and the
     # nano model grading its own output is the weakest possible judge.
     # Override per-run: VALIDATOR_GROUNDING_MODEL=gpt-4.1-nano (cost parity A/B).
     validator_grounding_model: str = "gpt-4.1-mini"
-    # Answerability routing gate. The review call ALWAYS produces an
-    # answers_question verdict (negligible marginal cost). This flag controls
-    # only whether a FALSE verdict ROUTES the response to no_results. Keeping it
-    # separate lets us A/B "does answerability help?" without prompt surgery:
-    # VALIDATOR_ANSWERABILITY_ENABLED=false keeps the verdict in traces but
-    # stops it from forcing no_results.
+    # Answerability routing gate. Answerability is now a DETERMINISTIC regex
+    # check (validator.check_answerability), not an LLM verdict — it routes a
+    # quantity question answered with no quantity to no_results. This flag
+    # controls only whether that check is allowed to force no_results; set
+    # VALIDATOR_ANSWERABILITY_ENABLED=false to A/B with the gate disabled.
     validator_answerability_enabled: bool = True
 
     # --- HyDE knobs ---

@@ -42,7 +42,24 @@ PROMPT_VERSION = "v2.2"  # v2.2: added embedded quantitative-hedge detection + r
 # Versioned independently of PROMPT_VERSION above — review_answer is a
 # separate LLM call with its own prompt, so its version moves on its own.
 # v2.0: merged answerability judgment into the faithfulness pass (one call).
-REVIEW_PROMPT_VERSION = "v2.0"
+# v2.1: two complementary answerability refinements (subject-pivot override +
+#       what/which-foods scope note).
+# v3.0: REMOVED answerability from this LLM call entirely. The soft-prompt
+#       answerability verdict proved non-deterministic at temperature 0 (the
+#       same case oscillated TRUE/FALSE across runs; layering more prose rules
+#       in v2.1 did not fix it). Per the project's "soft rules that bypass →
+#       enforce deterministically" pattern, answerability is now a narrow
+#       regex gate (check_answerability, below) wired into the pipeline. This
+#       call is back to PURE faithfulness — one job, judged reliably.
+# v3.1: tightened the METHOD decomposition step (not a new rule — a granularity
+#       fix). The "added purpose/benefit" rule already existed but did not fire
+#       because the judge kept a grounded fact and its tacked-on ungrounded
+#       purpose ("…to support health and development") in ONE coarse claim, and
+#       the grounded half shielded the bad half. RAGAS decomposes atomically and
+#       failed it; our judge under-split and passed it. Step 1 now forces
+#       purpose/benefit clauses and per-item attributions into separate claims
+#       so the existing rule can actually catch them.
+REVIEW_PROMPT_VERSION = "v3.1"
 
 # Forbidden opener patterns. Regex used ONLY to decide whether to invoke
 # the LLM rewriter — NOT to classify or filter content (where LLM judgement
@@ -402,28 +419,27 @@ def validate_and_fix(answer: str, profile: UserProfile) -> ValidationResult:
     return result
 
 
-# --- Answer review (faithfulness + answerability) ----------------------------
+# --- Answer review (faithfulness) --------------------------------------------
 #
-# This is ONE LLM call that judges the answer on two orthogonal axes that both
-# read the answer against a reference:
-#   1. Faithfulness — is every claim grounded in the retrieved CONTEXT?
-#      (RAGAS-style claim decomposition; corrects by dropping unsupported parts.)
-#   2. Answerability — does the SURVIVING grounded answer actually deliver the
-#      specific information the QUESTION asks for? A faithful but off-question
-#      answer (e.g. the corpus mentions a topic but never the quantity asked)
-#      should route to no_results, which pure faithfulness can't force.
+# This is ONE LLM call with ONE job: faithfulness. Is every claim in the answer
+# grounded in the retrieved CONTEXT? (RAGAS-style claim decomposition; corrects
+# by dropping unsupported parts.)
 #
-# Why these two share a call but validate_and_fix stays separate:
-#   - Both are "judge the answer against a reference" tasks and both want the
-#     STRONGER mini judge — folding them is near-free (answerability adds only
-#     the question + one boolean). validate_and_fix is a profile-safety REWRITE
-#     on the nano model with cheap deterministic pre-gates; merging it would
-#     force it onto mini, collapse two independent rewrites into one, and lose
-#     its zero-LLM-call common case. So: 2 calls, not 1 or 3.
-#   - This call has no cheap deterministic gate. "Is this claim grounded?" /
-#     "does this answer the question?" can only be answered by an LLM reading
-#     the context, so it's always-on per answer. The only gate is the
-#     enabled/disabled config flag.
+# Answerability ("does the surviving answer deliver what the question asked?")
+# USED to live here too, but it proved non-deterministic at temperature 0 and
+# has moved out to a deterministic regex gate — check_answerability, above —
+# wired into the pipeline. Keeping faithfulness alone here means the judge has a
+# single, well-posed task it can do reliably.
+#
+# Why this stays separate from validate_and_fix:
+#   - Faithfulness wants the STRONGER mini judge (detecting an ungrounded claim
+#     is harder than generating one). validate_and_fix is a profile-safety
+#     REWRITE on the nano model with cheap deterministic pre-gates; merging it
+#     would force it onto mini, collapse two independent rewrites into one, and
+#     lose its zero-LLM-call common case. So: 2 calls, not 1.
+#   - This call has no cheap deterministic gate. "Is this claim grounded?" can
+#     only be answered by an LLM reading the context, so it's always-on per
+#     answer. The only gate is the enabled/disabled config flag.
 #
 # Why a STRONGER judge model (settings.validator_grounding_model, default
 # gpt-4.1-mini) than the nano answer model: detecting an ungrounded claim is
@@ -457,7 +473,7 @@ class _ClaimVerdict(BaseModel):
 
 class AnswerReview(BaseModel):
     """
-    Output of review_answer (faithfulness + answerability).
+    Output of review_answer (faithfulness only).
 
     is_grounded: True if EVERY claim in the answer is grounded.
     claims: per-claim decomposition + verdicts (also useful for tracing).
@@ -467,23 +483,21 @@ class AnswerReview(BaseModel):
       answer by the calling code, NOT by the LLM — same no-echo-trust safety
       as ValidationResult. The LLM only rewrites when claims are ungrounded.
 
-    answers_question: True if the SURVIVING grounded answer delivers the
-      specific information the question asks for. Judged on the corrected
-      answer (post-strip). False routes to no_results (gated by config).
-    answerability_note: one-line reasoning for the answerability verdict
-      (tracing only).
+    (Answerability is no longer judged here — see check_answerability, a
+    deterministic regex gate the pipeline applies to corrected_answer.)
     """
     is_grounded: bool
     claims: list[_ClaimVerdict]
     corrected_answer: str
-    answers_question: bool
-    answerability_note: str
 
 
-_REVIEW_SYSTEM_PROMPT = """You are a reviewer for a pregnancy-nutrition assistant. You judge an ANSWER on two axes: (1) is it fully grounded in the provided CONTEXT, and (2) does it actually answer the QUESTION. When the answer is not grounded, you produce a corrected answer with the unsupported parts removed.
+_REVIEW_SYSTEM_PROMPT = """You are a reviewer for a pregnancy-nutrition assistant. You judge whether an ANSWER is fully grounded in the provided CONTEXT. When the answer is not grounded, you produce a corrected answer with the unsupported parts removed.
 
 METHOD (follow it exactly — do not judge by overall impression):
-  1. Decompose the answer into atomic claims — one simple factual statement each. A sentence with two facts becomes two claims.
+  1. Decompose the answer into atomic claims — one simple factual statement each. Split aggressively; under-splitting is the main way a hallucination escapes review:
+     - A sentence with two facts becomes two claims.
+     - A clause stating a PURPOSE, BENEFIT, or RESULT — "to support X", "which helps Y", "for Z", "so that…", "to promote…", "to keep you healthy" — becomes its OWN claim, separate from the factual statement it is attached to. A benefit or purpose tacked onto the end of an otherwise-grounded sentence is the single most common place an ungrounded claim hides. Never let a grounded clause carry an ungrounded purpose through as one claim — isolate the purpose and judge it on its own.
+     - When a sentence attributes a property to a SET of items ("these foods provide…", "they are rich in…"), the claim is that THOSE SPECIFIC items have that property. Verify the context attaches that property to the SAME items — not merely to some other items somewhere else in the context. Borrowing a property the context stated about a different list is an ungrounded merge.
   2. For each claim, decide whether the CONTEXT supports it.
   3. The answer is_grounded only if EVERY claim is supported.
 
@@ -509,18 +523,10 @@ CORRECTION (only when is_grounded is false):
   - Preserve the original voice, tone, and length of what remains.
   - If, after removing every ungrounded claim, the ONLY thing left would be a deflection (see above) or nothing at all, then the answer had no grounded content to begin with. In that case set corrected_answer to the EMPTY STRING "" — do NOT keep the deflection, and do NOT invent a replacement. The calling code converts an empty result into an honest "I don't have that information" response.
 
-ANSWERABILITY (judge this on the answer AS IT WILL STAND after your corrections — i.e. the grounded content that remains; if everything is grounded, the whole answer):
-  Identify the specific thing the QUESTION asks for (a quantity, a list of foods, a yes/no with reason, etc.). Then decide whether the remaining grounded answer actually delivers it.
-  - answers_question is TRUE when the answer provides what was asked, even partially or in general terms. Default to TRUE — be lenient. A direct, on-topic answer counts even if it is brief or could say more.
-  - answers_question is FALSE only when the answer clearly fails to deliver the specific thing asked: it discusses the surrounding topic but omits the actual ask. Example: the question asks HOW MUCH of something per day and the answer only names what to consume without any amount → it does not answer the question. Example: the question asks WHICH foods provide a nutrient and the answer only discusses a supplement or a general diet without naming any such food → it does not answer the question.
-  When in doubt, choose TRUE. Only the clear non-answers above should be FALSE.
-
 OUTPUT:
   - is_grounded: true only if every claim is grounded.
   - claims: the decomposition with per-claim grounded/evidence.
   - corrected_answer: when is_grounded is true, set this to the EMPTY STRING "" — the calling code reuses the original answer, so do NOT echo it. When is_grounded is false, set it to the corrected text, OR the empty string "" if nothing grounded remains (see CORRECTION).
-  - answers_question: true/false per ANSWERABILITY above, judged on the answer that remains after correction.
-  - answerability_note: one short sentence naming what the question asked for and whether the answer delivered it.
 """
 
 
@@ -543,18 +549,100 @@ def _is_pure_deflection(text: str) -> bool:
     )
 
 
+# --- Deterministic answerability gate ----------------------------------------
+#
+# Replaces the old LLM answerability verdict (removed from review_answer in
+# v3.0). That soft-prompt judgment oscillated TRUE/FALSE across runs at
+# temperature 0, and layering more prose rules did not fix it — the same
+# "soft rules bypass → enforce deterministically" pattern the diet and opener
+# checks already follow.
+#
+# Scope is deliberately narrow. Across the whole eval suite, the ONLY answers
+# that must route to no_results on answerability grounds are QUANTITY questions
+# answered with NO quantity (e.g. "how much water should I drink?" answered by
+# listing beverages, with no amount). So the rule collapses to exactly that:
+#
+#   A quantity question ("how much / how many / what amount/quantity") whose
+#   answer conveys NO amount of any kind → unanswerable.
+#
+# Everything else is answerable:
+#   - A non-quantity question (a meal-plan ask, a "which foods" ask) never trips
+#     the gate — it returns True regardless of the answer.
+#   - A quantity question answered with a number, a spelled count, OR a
+#     directional amount ("limit it", "reduce intake" — the salt/hypertension
+#     case) is answerable.
+#
+# False negatives (a genuine non-answer we let through) are acceptable — they
+# cost a slightly-off answer, not a safety failure. The gate is intentionally
+# conservative so it never suppresses a legitimate answer.
+
+_QUANTITY_QUESTION_PATTERNS: list[re.Pattern] = [
+    re.compile(p, re.IGNORECASE) for p in (
+        r"\bhow much\b",
+        r"\bhow many\b",
+        r"\bwhat(?:'?s| is)? the (?:amount|quantity)\b",
+        r"\bwhat (?:amount|quantity)\b",
+    )
+]
+
+# Signals that an answer actually conveys an AMOUNT. Any single match is enough.
+#
+# Deliberately does NOT match bare measure/serving units ("glasses", "cups").
+# A unit word only means "amount" when attached to a number — and the digit
+# pattern already catches "8 glasses" / "2 litres". On its own a unit word is
+# noise: it shows up echoed from the question ("how many GLASSES") and, worse,
+# inside deflections ("the number of glasses is NOT PROVIDED"), which is exactly
+# how the water_intake non-answer slipped through as "answerable". So magnitude
+# must come from a digit, a spelled-out count, or a directional term.
+_AMOUNT_PRESENCE_PATTERNS: list[re.Pattern] = [
+    re.compile(p, re.IGNORECASE) for p in (
+        r"\d",  # any digit: "2-3 litres", "1000 mg", "8 glasses"
+        # spelled-out counts
+        r"\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|half|dozen)\b",
+        # directional / qualitative amounts — answer the "how much" axis without a number
+        r"\b(?:limit|reduce|restrict|increase|avoid|minimi[sz]e|fewer|less|more|"
+        r"moderate|adequate|enough|plenty|sufficient|extra)\b",
+    )
+]
+
+
+def _is_quantity_question(question: str) -> bool:
+    return any(pat.search(question) for pat in _QUANTITY_QUESTION_PATTERNS)
+
+
+def _answer_states_amount(answer: str) -> bool:
+    return any(pat.search(answer) for pat in _AMOUNT_PRESENCE_PATTERNS)
+
+
+def check_answerability(question: str, answer: str) -> bool:
+    """
+    Deterministic answerability gate. Returns True when the answer is considered
+    to answer the question, False when it should route to no_results.
+
+    The ONLY False case is a quantity question ("how much / how many / what
+    amount") whose answer conveys no amount at all — no number, no unit, no
+    spelled count, and no directional amount. Every other question/answer pair
+    returns True; the gate does not second-guess non-quantity questions.
+    """
+    if not answer.strip():
+        return False
+    if not _is_quantity_question(question):
+        return True
+    return _answer_states_amount(answer)
+
+
 @observe(name="review_answer")
 def review_answer(answer: str, context: str, question: str) -> AnswerReview:
     """
-    Review `answer` on two axes in a single LLM call:
-      - faithfulness: every claim grounded in `context` (corrects by dropping
-        unsupported parts);
-      - answerability: the surviving grounded answer delivers what `question`
-        asks for.
+    Review `answer` for faithfulness in a single LLM call: every claim must be
+    grounded in `context`; ungrounded parts are dropped from corrected_answer.
+
+    (Answerability is no longer judged here — the pipeline applies the
+    deterministic check_answerability gate to corrected_answer instead.)
 
     `context` is the SAME formatted context string the answer LLM saw — the
     judge evaluates against exactly what the model was shown. `question` is the
-    original user message.
+    original user message (still accepted for the prompt's framing).
 
     Gate: when settings.validator_grounding_enabled is False, returns the
     original answer with zero LLM calls (used to A/B the feature in eval).
@@ -573,11 +661,10 @@ def review_answer(answer: str, context: str, question: str) -> AnswerReview:
     if not settings.validator_grounding_enabled:
         update_current_span(
             metadata={"review_skipped": "disabled"},
-            output={"is_grounded": True, "answers_question": True, "corrected": False},
+            output={"is_grounded": True, "corrected": False},
         )
         return AnswerReview(
             is_grounded=True, claims=[], corrected_answer=answer,
-            answers_question=True, answerability_note="review disabled",
         )
 
     update_current_span(input={
@@ -626,8 +713,6 @@ def review_answer(answer: str, context: str, question: str) -> AnswerReview:
         is_grounded=raw.is_grounded,
         claims=list(raw.claims),
         corrected_answer=final_answer,
-        answers_question=raw.answers_question,
-        answerability_note=raw.answerability_note,
     )
 
     n_ungrounded = sum(1 for c in result.claims if not c.grounded)
@@ -635,13 +720,11 @@ def review_answer(answer: str, context: str, question: str) -> AnswerReview:
         output={
             "is_grounded": result.is_grounded,
             "corrected_answer": result.corrected_answer,
-            "answers_question": result.answers_question,
         },
         metadata={
             "n_claims": len(result.claims),
             "n_ungrounded": n_ungrounded,
             "answer_changed": result.corrected_answer != answer,
-            "answerability_note": result.answerability_note,
             "claims": [c.model_dump() for c in result.claims],
         },
     )

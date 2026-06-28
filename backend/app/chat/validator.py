@@ -37,7 +37,7 @@ from backend.app.config import settings
 from backend.app.models.schemas import UserProfile
 from backend.app.observability import observe, update_current_span
 
-PROMPT_VERSION = "v2.2"  # v2.2: added embedded quantitative-hedge detection + rule
+PROMPT_VERSION = "v2.3"  # v2.3: extend embedded-hedge detection to safety-hedge family ("does not explicitly state ... safe")
 
 # Versioned independently of PROMPT_VERSION above — review_answer is a
 # separate LLM call with its own prompt, so its version moves on its own.
@@ -132,14 +132,19 @@ _EMBEDDED_HEDGE_PATTERNS: list[re.Pattern] = [
         r"do(?:es)?\s+not\s+specify\s+(?:an?\s+|the\s+)?(?:exact|specific|precise)\b",
         r"don'?t\s+specify\s+(?:an?\s+|the\s+)?(?:exact|specific|precise)\b",
         r"\bno\s+(?:exact|specific|precise)\s+(?:amount|number|quantity|dose|dosage|serving)\b",
+        # Safety-hedge family: "while it does not explicitly state that X is
+        # safe" — self-undermining phrasing that RAGAS's noncommittal gate
+        # hard-zeroes (amla: answer_relevancy 0 despite grounded content).
+        r"do(?:es)?\s+not\s+explicitly\s+(?:state|mention|say|confirm)\b",
     )
 ]
 
 _EMBEDDED_HEDGE_RULE = (
     "EMBEDDED HEDGE REMOVAL — REQUIRED. An automated regex pre-check has "
-    "confirmed the answer contains a quantitative deflection such as "
-    "'...do not specify the exact amount' or '...does not specify a precise "
-    "number' embedded in the body — not just at the start or end. RAGAS's "
+    "confirmed the answer contains a deflection such as "
+    "'...do not specify the exact amount', '...does not specify a precise "
+    "number', or '...does not explicitly state that X is safe' embedded in "
+    "the body — not just at the start or end. RAGAS's "
     "noncommittal classifier scores this as evasive even when the surrounding "
     "answer is substantive. This IS a confirmed violation; you do not need to "
     "re-verify it. Your job: set is_compliant=false, add a violation with "
@@ -150,7 +155,11 @@ _EMBEDDED_HEDGE_RULE = (
     "the guidelines do not specify the exact number of servings per day. "
     "Choose options you enjoy.' → rewritten: 'Include a variety of whole "
     "grains in your meals. Choose options you enjoy.' (drop only the hedge "
-    "clause; keep the recommendation)."
+    "clause; keep the recommendation).\n"
+    "Example — original: 'Whole grains like oats are a good source of fibre, "
+    "but the guidelines do not explicitly state that oats are safe to eat.' → "
+    "rewritten: 'Whole grains like oats are a good source of fibre.' (drop "
+    "only the hedge clause; keep the recommendation)."
 )
 
 

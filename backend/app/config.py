@@ -92,7 +92,15 @@ class Settings(BaseSettings):
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
 
     # --- LLM knobs ---
-    llm_model: str = "gpt-4.1-nano"
+    # Answer model. Switched nano → mini after an A/B (2026-06-27): faithfulness
+    # was identical across both (~0.82 mean, variance-limited — see eval reports
+    # eval_20260627_173136 / _173619), but mini gave a reliable answer_relevancy
+    # gain (0.88 → 0.93) with notably tighter run-to-run variance. Cost is ~5×
+    # nano per answer but negligible in absolute terms at this app's volume.
+    # NOTE: this value also drives the validate_and_fix rewriter, so the
+    # opener/hedge/cadence corrections now run on mini too.
+    # Override per-run: LLM_MODEL=gpt-4.1-nano python -m eval.ragas_eval.
+    llm_model: str = "gpt-4.1-mini"
     # Lower temperature = more consistent, factual answers (good for medical).
     # Tried 0.1 to reduce "creative gap-filling," but the eval showed it made
     # BOTH faithfulness AND context_precision worse — so 0.3 stays. The
@@ -112,10 +120,10 @@ class Settings(BaseSettings):
     # is an always-on LLM call per answer (acceptable for an eval suite).
     # Disable to A/B in eval: VALIDATOR_GROUNDING_ENABLED=false.
     validator_grounding_enabled: bool = True
-    # Judge model. Deliberately STRONGER than llm_model (gpt-4.1-nano):
-    # detecting an ungrounded claim is harder than generating one, and the
-    # nano model grading its own output is the weakest possible judge.
-    # Override per-run: VALIDATOR_GROUNDING_MODEL=gpt-4.1-nano (cost parity A/B).
+    # Judge model. At least as strong as the answer model (llm_model, now
+    # gpt-4.1-mini): detecting an ungrounded claim is at least as hard as
+    # generating one, so the judge must never be the weaker model. Override
+    # per-run: VALIDATOR_GROUNDING_MODEL=gpt-4.1-nano (cost parity A/B).
     validator_grounding_model: str = "gpt-4.1-mini"
     # Answerability routing gate. Answerability is now a DETERMINISTIC regex
     # check (validator.check_answerability), not an LLM verdict — it routes a

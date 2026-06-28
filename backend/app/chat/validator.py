@@ -37,7 +37,7 @@ from backend.app.config import settings
 from backend.app.models.schemas import UserProfile
 from backend.app.observability import observe, update_current_span
 
-PROMPT_VERSION = "v2.3"  # v2.3: extend embedded-hedge detection to safety-hedge family ("does not explicitly state ... safe")
+PROMPT_VERSION = "v2.4"  # v2.4: context-gated deterministic cadence stripper (duration→frequency drift, e.g. "180 days" restated as "daily")
 
 # Versioned independently of PROMPT_VERSION above — review_answer is a
 # separate LLM call with its own prompt, so its version moves on its own.
@@ -160,6 +160,46 @@ _EMBEDDED_HEDGE_RULE = (
     "but the guidelines do not explicitly state that oats are safe to eat.' → "
     "rewritten: 'Whole grains like oats are a good source of fibre.' (drop "
     "only the hedge clause; keep the recommendation)."
+)
+
+# Cadence / frequency terms. A duration the source gives ("for at least N
+# days") is repeatedly restated by the answer model as a frequency ("daily")
+# that the source never stated — RAGAS scores the invented cadence as an
+# ungrounded claim (edge_short_query 0.0, iron_basic 0.5 → 1.0 regression). The
+# soft prompt rule against this is bypassed by the nano answer model at temp
+# 0.3, so detection moves here (R31: soft rule bypass → enforce deterministically).
+# CONTEXT-GATED at call time: only fires when the context contains no cadence
+# at all, so legitimately-grounded "daily"s (folic, calcium, salt — whose
+# sources DO say daily/per day) are never touched.
+_CADENCE_PATTERNS: list[re.Pattern] = [
+    re.compile(p, re.IGNORECASE) for p in (
+        r"\bdaily\b",
+        r"\bevery\s+day\b",
+        r"\beach\s+day\b",
+        r"\bper\s+day\b",
+        r"\bonce\s+(?:a|per)\s+day\b",
+        r"\btwice\s+(?:a|per)\s+day\b",
+        r"\b\w+\s+times\s+(?:a|per)\s+day\b",
+        r"\bonce\s+daily\b",
+        r"\btwice\s+daily\b",
+    )
+]
+
+_CADENCE_RULE = (
+    "UNGROUNDED FREQUENCY REMOVAL — REQUIRED. An automated check has confirmed "
+    "the answer states a frequency/cadence (e.g. 'daily', 'every day', 'per "
+    "day', 'twice a day') that the retrieved source context does NOT state. A "
+    "common cause is restating a DURATION the source gives ('for the full "
+    "course', 'for the recommended period') as a frequency the source never "
+    "gave. RAGAS scores the unstated cadence as an ungrounded claim. This IS a "
+    "confirmed violation; you do not need to re-verify it. Your job: set "
+    "is_compliant=false, add a violation with field='cadence', and produce a "
+    "corrected_answer that REMOVES ONLY the frequency word while keeping every "
+    "quantity, duration, and the recommendation intact. Fix the surrounding "
+    "grammar minimally (e.g. the article a/an). Do NOT add new facts.\n"
+    "Example — original: 'Take the prescribed supplement daily for the full "
+    "course.' → rewritten: 'Take the prescribed supplement for the full "
+    "course.' (drop only the cadence word; keep the duration and recommendation)."
 )
 
 
@@ -288,8 +328,32 @@ def _has_embedded_hedge(answer: str) -> bool:
     return any(pat.search(answer) for pat in _EMBEDDED_HEDGE_PATTERNS)
 
 
+def _has_ungrounded_cadence(answer: str, context: str) -> bool:
+    """
+    Detect a frequency/cadence term in the answer that the retrieved CONTEXT
+    does not contain. The failure mode: the source states a DURATION ("for at
+    least N days") and the answer restates it as a FREQUENCY ("daily") the
+    source never gave — RAGAS scores the invented cadence as ungrounded.
+
+    Context-gated to avoid false positives: if the context itself contains ANY
+    cadence term, the answer's cadence is legitimately grounded (even when it
+    paraphrases "every day" as "daily"), so we do NOT fire. We fire only when
+    the answer asserts a cadence and the context has no cadence at all. This is
+    what protects the genuinely-grounded "daily"s (folic/calcium/salt), whose
+    source chunks DO state a frequency, from being stripped.
+    """
+    if not answer or not context:
+        return False
+    if not any(pat.search(answer) for pat in _CADENCE_PATTERNS):
+        return False
+    context_has_cadence = any(pat.search(context) for pat in _CADENCE_PATTERNS)
+    return not context_has_cadence
+
+
 @observe(name="validate_and_fix")
-def validate_and_fix(answer: str, profile: UserProfile) -> ValidationResult:
+def validate_and_fix(
+    answer: str, profile: UserProfile, context: str | None = None,
+) -> ValidationResult:
     """
     Validate an answer against profile rules + universal opener rule, and
     return a (possibly corrected) version.
@@ -305,9 +369,12 @@ def validate_and_fix(answer: str, profile: UserProfile) -> ValidationResult:
     has_opener_issue = _has_deflective_opener(answer)
     has_trailing_issue = _has_trailing_deflection(answer)
     has_embedded_hedge = _has_embedded_hedge(answer)
+    has_ungrounded_cadence = (
+        context is not None and _has_ungrounded_cadence(answer, context)
+    )
 
-    if (not dietary_rules and not has_opener_issue
-            and not has_trailing_issue and not has_embedded_hedge):
+    if (not dietary_rules and not has_opener_issue and not has_trailing_issue
+            and not has_embedded_hedge and not has_ungrounded_cadence):
         update_current_span(
             metadata={"validation_skipped": "no_applicable_rules_and_clean"},
             output={"is_compliant": True, "corrected": False},
@@ -326,6 +393,8 @@ def validate_and_fix(answer: str, profile: UserProfile) -> ValidationResult:
         rules.append(_TRAILING_RULE)
     if has_embedded_hedge:
         rules.append(_EMBEDDED_HEDGE_RULE)
+    if has_ungrounded_cadence:
+        rules.append(_CADENCE_RULE)
     rules.extend(dietary_rules)
 
     update_current_span(input={
@@ -333,6 +402,7 @@ def validate_and_fix(answer: str, profile: UserProfile) -> ValidationResult:
         "has_opener_issue_pre_check": has_opener_issue,
         "has_trailing_issue_pre_check": has_trailing_issue,
         "has_embedded_hedge_pre_check": has_embedded_hedge,
+        "has_ungrounded_cadence_pre_check": has_ungrounded_cadence,
         "n_dietary_rules": len(dietary_rules),
         "original_answer": answer,
         "prompt_version": PROMPT_VERSION,
@@ -392,6 +462,16 @@ def validate_and_fix(answer: str, profile: UserProfile) -> ValidationResult:
             explanation=(
                 "Regex pre-check detected an embedded quantitative hedge "
                 "(LLM missed or ignored the rule)."
+            ),
+        ))
+    if has_ungrounded_cadence and not any(v.field == "cadence" for v in violations):
+        is_compliant = False
+        violations.append(_Violation(
+            field="cadence",
+            violating_foods=[],
+            explanation=(
+                "Regex pre-check detected a frequency/cadence term absent from "
+                "the retrieved context (LLM missed or ignored the rule)."
             ),
         ))
 

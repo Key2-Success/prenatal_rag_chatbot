@@ -304,7 +304,8 @@ def run_chat(
     #    ("the context doesn't mention X") that the opener/trailing pass below
     #    then strips. Reverse order wouldn't catch that. (Answerability is judged
     #    separately by the deterministic check_answerability gate in 5a.)
-    review = review_answer(answer, _format_context(chunks), request.message)
+    context_str = _format_context(chunks)
+    review = review_answer(answer, context_str, request.message)
 
     # 5a. Route to no_results when EITHER gate says the corpus didn't really
     #     answer this question:
@@ -343,7 +344,7 @@ def run_chat(
     #    cleanly. When something DOES apply, the validator detects violations
     #    AND returns a corrected version in one LLM call.
     #    See backend/app/chat/validator.py for the full design rationale.
-    validation = validate_and_fix(answer, profile)
+    validation = validate_and_fix(answer, profile, context=context_str)
     answer = validation.corrected_answer
 
     # 7. Update the chat span with the final answer (post-review, post-

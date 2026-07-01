@@ -101,13 +101,21 @@ class Settings(BaseSettings):
     # opener/hedge/cadence corrections now run on mini too.
     # Override per-run: LLM_MODEL=gpt-4.1-nano python -m eval.ragas_eval.
     llm_model: str = "gpt-4.1-mini"
-    # Lower temperature = more consistent, factual answers (good for medical).
-    # Tried 0.1 to reduce "creative gap-filling," but the eval showed it made
-    # BOTH faithfulness AND context_precision worse — so 0.3 stays. The
-    # hallucination problem is a grounding problem, not a sampling-randomness
-    # problem; it needs a hard post-generation grounding check, not a lower
-    # temperature. Keep at 0.3.
-    llm_temperature: float = 0.3
+    # 0 for reproducibility. History: a 2026-05 experiment set this to 0.1 and
+    # reported faithfulness/context_precision got WORSE, concluding the problem
+    # was grounding (not sampling) and reverting to 0.3. That comparison was a
+    # SINGLE eval run each — and we have since established (see the per-case
+    # faithfulness matrix, 2026-06-27) that single-run faithfulness is variance-
+    # dominated: the same code scores calcium 0.167 and 1.0 on consecutive runs.
+    # A single 0.1-vs-0.3 run therefore couldn't detect a real temperature effect
+    # at all; it measured noise. At temp 0.3 the answer LLM regenerates a
+    # different answer every request, so a stray ungrounded rider appears in a
+    # fraction of runs and swings the tiny-denominator score 0.5↔1.0. Setting
+    # temperature 0 fixes the answer text across runs, removing the answer-side
+    # regeneration noise so faithfulness reflects the grounding logic, not the
+    # sampler. Verified with 3× repeat eval runs (grounding is still enforced by
+    # the post-generation review + deterministic strippers, not by temperature).
+    llm_temperature: float = 0.0
 
     # --- Answer review knobs (faithfulness) ---
     # Hard post-generation review. The answer model's system prompt has

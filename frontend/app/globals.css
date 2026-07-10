@@ -1,0 +1,44 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  @apply bg-sand-100 text-sand-800 antialiased;
+  /* Soft paper texture: a barely-there warm gradient, not a flat fill. */
+  background-image: radial-gradient(
+    120% 90% at 50% -10%,
+    theme("colors.rose.50") 0%,
+    theme("colors.sand.100") 55%
+  );
+  background-attachment: fixed;
+}
+
+/* Thin, unobtrusive scrollbars that match the warm neutral scale. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: theme("colors.sand.300") transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background-color: theme("colors.sand.300");
+  border-radius: 9999px;
+}
+
+/* Focus ring: warm rose, consistent across every interactive control. */
+.focus-rose:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px theme("colors.sand.50"),
+    0 0 0 4px theme("colors.rose.400");
+}

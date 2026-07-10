@@ -26,9 +26,9 @@ function MotherAppleMark({ className }: { className?: string }) {
       {/* long, curly mermaid hair: a crown sweep and three wavy locks whose
           ends billow out to the south-east, away from the body — carefree
           and breezy rather than sleek */}
-      <path d="M28 8.6 C 28.6 4.5, 34.6 3.8, 37.6 7.6 C 41.6 9, 40.6 11.8, 43.6 12.8 C 45.6 13.5, 44.8 15.6, 46.6 16.4 C 47.2 16.7, 47 18, 45.8 18.6" />
-      <path d="M37 11.2 C 40 12.2, 39 14.4, 41.8 15.4 C 43.8 16.1, 42.8 18, 44.6 18.8" />
-      <path d="M35.4 13.6 C 37.8 14.5, 37 16.6, 39.2 17.6 C 40.8 18.3, 40.2 19.8, 41.6 20.4" />
+      <path d="M28 8.6 C 28.6 4.5, 34.6 3.8, 37.6 7.6 C 41.8 8.8, 41 11.4, 44 12.2 C 45.8 12.7, 45.4 14.4, 46.5 15.5" />
+      <path d="M37 11.2 C 40.2 12, 39.4 14.2, 42.2 15 C 44 15.5, 43.4 17.2, 44.5 18.5" />
+      <path d="M35.4 13.6 C 37.9 14.4, 37.2 16.4, 39.4 17.4 C 41 18.1, 40.6 19.6, 41.5 21" />
       {/* rounded back — the apple's right side */}
       <path d="M31.7 16 C 37 18.8, 38.5 27, 34 34" />
       {/* front: chest into a round apple belly, curving under to meet the back */}

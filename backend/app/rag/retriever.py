@@ -38,6 +38,7 @@ from pydantic import BaseModel
 from backend.app.config import PROJECT_ROOT, settings
 from backend.app.observability import observe, update_current_span
 from backend.app.rag.chunker import Chunk
+from backend.app.timing import record_stage
 from backend.app.rag.embedder import EMBEDDING_DIMENSIONS, embed_query
 from backend.app.sources import priority_order, priority_rank_by_org
 
@@ -499,19 +500,22 @@ def retrieve_and_rerank(query: str, profile=None) -> list[RetrievedChunk]:
         # hyde.py when HyDE is disabled (and to avoid a circular import if
         # hyde ever needs the embedder).
         from backend.app.rag.hyde import generate_hypothetical_answer
-        text_to_embed = generate_hypothetical_answer(query, profile)
+        with record_stage("hyde"):
+            text_to_embed = generate_hypothetical_answer(query, profile)
     else:
         text_to_embed = query
 
-    embedding = embed_query(text_to_embed)
+    with record_stage("embed"):
+        embedding = embed_query(text_to_embed)
 
     # Stage 1: recall from all sources, pool, deduplicate.
     all_candidates: list[RetrievedChunk] = []
     sources_hit: dict[str, int] = {}
-    for source_name in priority_order():
-        source_chunks = _query_source(source_name, embedding, bm25_query)
-        sources_hit[source_name] = len(source_chunks)
-        all_candidates.extend(source_chunks)
+    with record_stage("pinecone"):
+        for source_name in priority_order():
+            source_chunks = _query_source(source_name, embedding, bm25_query)
+            sources_hit[source_name] = len(source_chunks)
+            all_candidates.extend(source_chunks)
 
     all_candidates = _dedup_by_text(all_candidates)
 
@@ -534,16 +538,18 @@ def retrieve_and_rerank(query: str, profile=None) -> list[RetrievedChunk]:
     # answer LLM) and Pinecone queries still parallelise normally with
     # --parallel-runs. Reranker work is ~13s of a ~5min eval, so this
     # serialisation costs little but prevents hangs.
-    reranker = _get_reranker()
+    with record_stage("rerank_load"):
+        reranker = _get_reranker()
     # Build a profile-aware reranker query in natural prose so the cross-encoder
     # can attend dietary/medical constraints directly against chunk tokens.
     # Uses bm25_query (the clean, tag-stripped query) as the base — the [Diet: X]
     # tag was for the embedding channel only, not for cross-encoder input.
     reranker_query = _build_reranker_query(bm25_query, profile)
     pairs = [(reranker_query, c.text) for c in all_candidates]
-    with _reranker_lock:
-        raw_scores = reranker.predict(pairs)
-    scores = 1.0 / (1.0 + np.exp(-np.asarray(raw_scores)))  # sigmoid
+    with record_stage("rerank_infer"):
+        with _reranker_lock:
+            raw_scores = reranker.predict(pairs)
+        scores = 1.0 / (1.0 + np.exp(-np.asarray(raw_scores)))  # sigmoid
 
     # Pick the top_k candidates by reranker score. The returned indices point
     # back into all_candidates so we can preserve full metadata.

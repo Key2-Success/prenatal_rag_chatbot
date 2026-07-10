@@ -31,6 +31,7 @@ from backend.app.models.schemas import (
 )
 from backend.app.observability import observe, update_current_span
 from backend.app.rag.retriever import RetrievedChunk, retrieve_and_rerank
+from backend.app.timing import record_stage
 
 # SYSTEM_PROMPT design (2026-05-23 — schema-driven personalisation iteration):
 #
@@ -239,7 +240,8 @@ def run_chat(
 
     # 1. Triage the message. Emergency / out_of_scope short-circuit before
     #    any retrieval or answer-LLM cost.
-    label = classify_message(request.message)
+    with record_stage("classify_message"):
+        label = classify_message(request.message)
     short_circuit = _SHORT_CIRCUIT_BY_LABEL.get(label)
     if short_circuit is not None:
         response_type, canned = short_circuit
@@ -253,7 +255,8 @@ def run_chat(
     # answer it embeds — a vegetarian asking about protein gets a plant-based
     # hypothetical that matches plant-based chunks better.
     query = augment_query(request.message, profile)
-    chunks = retrieve_and_rerank(query, profile)
+    with record_stage("retrieve_and_rerank"):
+        chunks = retrieve_and_rerank(query, profile)
 
     # 3. No relevant chunks → no_results fallback (still no answer-LLM call).
     if not chunks:
@@ -269,7 +272,8 @@ def run_chat(
         )
 
     # 4. Generate the answer.
-    answer = _call_llm(profile, chunks, request.message)
+    with record_stage("answer_llm"):
+        answer = _call_llm(profile, chunks, request.message)
 
     from backend.app.chat.validator import (
         check_answerability,
@@ -285,7 +289,8 @@ def run_chat(
     #    then strips. Reverse order wouldn't catch that. (Answerability is judged
     #    separately by the deterministic check_answerability gate in 5a.)
     context_str = _format_context(chunks)
-    review = review_answer(answer, context_str, request.message)
+    with record_stage("review_answer"):
+        review = review_answer(answer, context_str, request.message)
 
     # 5a. Route to no_results when EITHER gate says the corpus didn't really
     #     answer this question:
@@ -300,7 +305,8 @@ def run_chat(
     #     some. Routing to no_results is the correct behaviour and is scored by
     #     the eval's routing layer (not RAGAS answer-quality).
     stripped_empty = not review.corrected_answer.strip()
-    answerable = check_answerability(request.message, review.corrected_answer)
+    with record_stage("answerability"):
+        answerable = check_answerability(request.message, review.corrected_answer)
     unanswerable = settings.validator_answerability_enabled and not answerable
     if stripped_empty or unanswerable:
         update_current_span(
@@ -324,7 +330,8 @@ def run_chat(
     #    cleanly. When something DOES apply, the validator detects violations
     #    AND returns a corrected version in one LLM call.
     #    See backend/app/chat/validator.py for the full design rationale.
-    validation = validate_and_fix(answer, profile, context=context_str)
+    with record_stage("validate_and_fix"):
+        validation = validate_and_fix(answer, profile, context=context_str)
     answer = validation.corrected_answer
 
     # 7. Update the chat span with the final answer (post-review, post-

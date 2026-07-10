@@ -117,6 +117,9 @@ export function WeekSlider({
           Week {value} · <span className="text-sand-500">{trimester}</span>
         </span>
       </div>
+      {/* Thumb + track styling lives in globals.css (.week-range) — plain
+          global CSS is more robust than styled-jsx under HMR. The fill %
+          is dynamic, so it stays here as an inline gradient. */}
       <input
         type="range"
         min={min}
@@ -125,38 +128,9 @@ export function WeekSlider({
         onChange={(e) => onChange(Number(e.target.value))}
         className="week-range focus-rose h-2 w-full cursor-pointer appearance-none rounded-full"
         style={{
-          background: `linear-gradient(to right, var(--rose-500) 0%, var(--rose-500) ${pct}%, var(--sand-200) ${pct}%, var(--sand-200) 100%)`,
+          background: `linear-gradient(to right, #cf6b8a 0%, #cf6b8a ${pct}%, #e9e3d9 ${pct}%, #e9e3d9 100%)`,
         }}
       />
-      <style jsx>{`
-        .week-range {
-          --rose-500: #cf6b8a;
-          --sand-200: #e9e3d9;
-        }
-        .week-range::-webkit-slider-thumb {
-          appearance: none;
-          width: 22px;
-          height: 22px;
-          border-radius: 9999px;
-          background: #fff;
-          border: 3px solid #cf6b8a;
-          box-shadow: 0 1px 4px rgba(157, 67, 96, 0.28);
-          cursor: pointer;
-          transition: transform 0.1s ease;
-        }
-        .week-range::-webkit-slider-thumb:active {
-          transform: scale(1.12);
-        }
-        .week-range::-moz-range-thumb {
-          width: 22px;
-          height: 22px;
-          border-radius: 9999px;
-          background: #fff;
-          border: 3px solid #cf6b8a;
-          box-shadow: 0 1px 4px rgba(157, 67, 96, 0.28);
-          cursor: pointer;
-        }
-      `}</style>
     </div>
   );
 }

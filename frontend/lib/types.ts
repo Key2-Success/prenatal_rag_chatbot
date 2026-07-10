@@ -38,12 +38,16 @@ export interface UserProfile {
   medical_conditions: MedicalCondition[];
 }
 
-// Source — a citation surfaced alongside an answer.
+// Source — a citation surfaced alongside an answer. chunk_text and
+// relevance_score power the hover/tap card (the retrieved passage + its
+// bge cross-encoder relevance score, 0–1).
 export interface Source {
   org_display_name: string;
   doc_title: string;
   page: number;
   year_published: number;
+  chunk_text: string;
+  relevance_score: number;
 }
 
 // ChatRequest / ChatResponse — the /chat endpoint contract.

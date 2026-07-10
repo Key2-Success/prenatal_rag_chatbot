@@ -202,6 +202,8 @@ def _to_sources(chunks: list[RetrievedChunk]) -> list[Source]:
             doc_title=c.doc_title,
             page=c.page_number,
             year_published=c.year_published,
+            chunk_text=c.text,
+            relevance_score=c.score,
         )
         for c in chunks
     ]

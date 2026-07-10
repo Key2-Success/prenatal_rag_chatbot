@@ -11,6 +11,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { ChatError, sendChat } from "@/lib/api";
 import type { ChatResponse, Source, UserProfile } from "@/lib/types";
 
@@ -19,17 +20,101 @@ type Message =
   | { role: "assistant"; response: ChatResponse }
   | { role: "error"; text: string };
 
+/**
+ * SourcePill — a compact `FOGSI · p.8` bubble. On hover (desktop) or tap
+ * (mobile) it reveals a card with the document title, the cross-encoder
+ * relevance score, and the full retrieved passage — "showing the RAG working".
+ *
+ * The card is rendered through a portal to document.body and positioned with
+ * `fixed` from the pill's bounding rect, so the thread's scroll container
+ * (overflow-y-auto) can't clip it. A short hover-intent delay lets the pointer
+ * travel from the pill into the card to scroll a long passage.
+ */
 function SourcePill({ source }: { source: Source }) {
+  const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  const pillRef = useRef<HTMLButtonElement>(null);
+  const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pct = Math.round(source.relevance_score * 100);
+
+  const show = () => {
+    if (hideTimer.current) clearTimeout(hideTimer.current);
+    const r = pillRef.current?.getBoundingClientRect();
+    if (r) setPos({ left: r.left + r.width / 2, top: r.top });
+    setOpen(true);
+  };
+  const scheduleHide = () => {
+    if (hideTimer.current) clearTimeout(hideTimer.current);
+    hideTimer.current = setTimeout(() => setOpen(false), 120);
+  };
+
+  // A fixed-position card goes stale if the page scrolls; close it instead.
+  useEffect(() => {
+    if (!open) return;
+    const close = () => setOpen(false);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    return () => {
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+    };
+  }, [open]);
+
   return (
-    <span className="inline-flex max-w-full items-center gap-1.5 rounded-full border border-sand-200 bg-sand-50 px-2.5 py-1 text-xs text-sand-600">
-      <span className="shrink-0 font-semibold text-rose-600">
-        {source.org_display_name}
-      </span>
-      <span className="shrink-0 text-sand-400">·</span>
-      <span className="min-w-0 flex-1 truncate">{source.doc_title}</span>
-      <span className="shrink-0 text-sand-400">·</span>
-      <span className="shrink-0">p.{source.page}</span>
-    </span>
+    <>
+      <button
+        ref={pillRef}
+        type="button"
+        onMouseEnter={show}
+        onMouseLeave={scheduleHide}
+        onFocus={show}
+        onBlur={scheduleHide}
+        onClick={() => (open ? setOpen(false) : show())}
+        aria-label={`Source: ${source.org_display_name}, page ${source.page}. ${pct}% relevance. Show passage.`}
+        className="focus-rose inline-flex shrink-0 items-center gap-1 rounded-full border border-sand-200 bg-sand-50 px-2.5 py-1 text-xs text-sand-600 transition-colors hover:border-rose-300 hover:bg-rose-50"
+      >
+        <span className="font-semibold text-rose-600">
+          {source.org_display_name}
+        </span>
+        <span className="text-sand-400">·</span>
+        <span>p.{source.page}</span>
+      </button>
+
+      {open &&
+        pos &&
+        createPortal(
+          <div
+            style={{
+              position: "fixed",
+              left: pos.left,
+              top: pos.top - 10,
+              transform: "translate(-50%, -100%)",
+            }}
+            onMouseEnter={show}
+            onMouseLeave={scheduleHide}
+            className="z-50 w-72 max-w-[calc(100vw-2rem)] animate-fade-up rounded-xl border border-sand-200 bg-sand-50 p-3 shadow-xl"
+          >
+            <div className="mb-1.5 flex items-center justify-between gap-2">
+              <span className="text-xs font-semibold text-rose-600">
+                {source.org_display_name} · p.{source.page}
+              </span>
+              <span className="shrink-0 rounded-full bg-rose-100 px-1.5 py-0.5 text-[0.65rem] font-semibold text-rose-700">
+                {pct}% match
+              </span>
+            </div>
+            <div className="mb-2 text-xs font-medium text-sand-700">
+              {source.doc_title}{" "}
+              <span className="text-sand-400">· {source.year_published}</span>
+            </div>
+            <p className="max-h-44 overflow-y-auto whitespace-pre-wrap text-xs leading-relaxed text-sand-600">
+              {source.chunk_text}
+            </p>
+            {/* downward arrow toward the pill */}
+            <div className="absolute left-1/2 top-full h-2.5 w-2.5 -translate-x-1/2 -translate-y-[6px] rotate-45 border-b border-r border-sand-200 bg-sand-50" />
+          </div>,
+          document.body,
+        )}
+    </>
   );
 }
 

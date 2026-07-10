@@ -42,3 +42,31 @@ body {
   box-shadow: 0 0 0 2px theme("colors.sand.50"),
     0 0 0 4px theme("colors.rose.400");
 }
+
+/* Week-of-pregnancy range slider thumb (WeekSlider). Global CSS rather than
+   styled-jsx so the pseudo-element styling reliably survives HMR. The track
+   fill gradient is applied inline on the element (it's value-dependent). */
+.week-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 9999px;
+  background: #fff;
+  border: 3px solid #cf6b8a;
+  box-shadow: 0 1px 4px rgba(157, 67, 96, 0.28);
+  cursor: pointer;
+  transition: transform 0.1s ease;
+}
+.week-range::-webkit-slider-thumb:active {
+  transform: scale(1.12);
+}
+.week-range::-moz-range-thumb {
+  width: 22px;
+  height: 22px;
+  border-radius: 9999px;
+  background: #fff;
+  border: 3px solid #cf6b8a;
+  box-shadow: 0 1px 4px rgba(157, 67, 96, 0.28);
+  cursor: pointer;
+}

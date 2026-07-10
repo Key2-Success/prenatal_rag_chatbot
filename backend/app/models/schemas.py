@@ -327,11 +327,23 @@ class ChatRequest(BaseModel):
 
 
 class Source(BaseModel):
-    """A citation surfaced alongside an answer."""
+    """
+    A citation surfaced alongside an answer.
+
+    `chunk_text` and `relevance_score` expose the actual retrieved passage
+    and its cross-encoder (bge-reranker-v2-m3) relevance score — the same
+    score shown in Langfuse traces. They power the frontend's citation
+    hover-card ("show the RAG working"). Both are pass-throughs from
+    RetrievedChunk; no extra computation. The score is a sigmoid-normalised
+    0–1 relevance value, not raw cosine similarity (cosine is not retained
+    past the rerank stage, and the cross-encoder score is more meaningful).
+    """
     org_display_name: str
     doc_title: str
     page: int
     year_published: int
+    chunk_text: str
+    relevance_score: float
 
 
 class ChatResponse(BaseModel):

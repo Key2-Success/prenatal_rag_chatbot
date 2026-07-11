@@ -30,6 +30,7 @@ Design decisions:
 import hashlib
 import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 from pinecone import Pinecone, ServerlessSpec
@@ -49,6 +50,10 @@ _UPSERT_BATCH_SIZE = 100
 # reranking has moved to a self-hosted CrossEncoder (see _get_reranker).
 _pinecone_client: Pinecone | None = None
 _pinecone_index = None
+# Guards first-call index init so the concurrent per-source queries in
+# retrieve_and_rerank can't race on create/validate. Double-checked, same
+# pattern as the reranker + BM25 singletons below.
+_pinecone_index_lock = threading.Lock()
 
 # Self-hosted cross-encoder reranker singleton + lock. Lazy-loaded on first
 # call (downloads ~600MB the first time, then cached in ~/.cache/huggingface).
@@ -244,28 +249,34 @@ def get_index():
     if _pinecone_index is not None:
         return _pinecone_index
 
-    pc = _get_client()
-    existing_names = pc.list_indexes().names()
+    with _pinecone_index_lock:
+        # Re-check inside the lock: another thread may have initialised the
+        # index while we waited (double-checked locking).
+        if _pinecone_index is not None:
+            return _pinecone_index
 
-    if settings.pinecone_index_name not in existing_names:
-        # Fresh project — create with dotproduct from the start.
-        pc.create_index(
-            name=settings.pinecone_index_name,
-            dimension=EMBEDDING_DIMENSIONS,
-            metric="dotproduct",
-            spec=ServerlessSpec(cloud="aws", region="us-east-1"),
-        )
-    else:
-        # Existing index — verify metric is dotproduct.
-        info = pc.describe_index(settings.pinecone_index_name)
-        if info.metric != "dotproduct":
-            raise RuntimeError(
-                f"Index '{settings.pinecone_index_name}' uses metric='{info.metric}' "
-                f"but hybrid search requires 'dotproduct'. Recreate it by running:\n"
-                f"    python -m scripts.ingest --recreate-index"
+        pc = _get_client()
+        existing_names = pc.list_indexes().names()
+
+        if settings.pinecone_index_name not in existing_names:
+            # Fresh project — create with dotproduct from the start.
+            pc.create_index(
+                name=settings.pinecone_index_name,
+                dimension=EMBEDDING_DIMENSIONS,
+                metric="dotproduct",
+                spec=ServerlessSpec(cloud="aws", region="us-east-1"),
             )
+        else:
+            # Existing index — verify metric is dotproduct.
+            info = pc.describe_index(settings.pinecone_index_name)
+            if info.metric != "dotproduct":
+                raise RuntimeError(
+                    f"Index '{settings.pinecone_index_name}' uses metric='{info.metric}' "
+                    f"but hybrid search requires 'dotproduct'. Recreate it by running:\n"
+                    f"    python -m scripts.ingest --recreate-index"
+                )
 
-    _pinecone_index = pc.Index(settings.pinecone_index_name)
+        _pinecone_index = pc.Index(settings.pinecone_index_name)
     return _pinecone_index
 
 
@@ -512,8 +523,18 @@ def retrieve_and_rerank(query: str, profile=None) -> list[RetrievedChunk]:
     all_candidates: list[RetrievedChunk] = []
     sources_hit: dict[str, int] = {}
     with record_stage("pinecone"):
-        for source_name in priority_order():
-            source_chunks = _query_source(source_name, embedding, bm25_query)
+        # Fan the per-source hybrid queries out across threads: each is a
+        # network-bound Pinecone call, so concurrency overlaps the waits.
+        # ThreadPoolExecutor.map preserves input order and we re-pool in
+        # priority order below, so all_candidates — and therefore dedup +
+        # rerank — is identical to the sequential version no matter which
+        # query returns first. This changes latency only, not results.
+        sources = priority_order()
+        with ThreadPoolExecutor(max_workers=len(sources)) as pool:
+            per_source = list(
+                pool.map(lambda s: _query_source(s, embedding, bm25_query), sources)
+            )
+        for source_name, source_chunks in zip(sources, per_source):
             sources_hit[source_name] = len(source_chunks)
             all_candidates.extend(source_chunks)
 

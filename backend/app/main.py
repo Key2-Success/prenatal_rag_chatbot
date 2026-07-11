@@ -12,6 +12,7 @@ Local dev:
 
 import logging
 import uuid
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,13 +20,30 @@ from fastapi.middleware.cors import CORSMiddleware
 from backend.app.chat.pipeline import run_chat
 from backend.app.models.schemas import ChatRequest, ChatResponse
 from backend.app.observability import propagate_attributes
+from backend.app.rag.retriever import warmup_reranker
 
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Startup/shutdown hook. Warm the cross-encoder reranker before the server
+    accepts traffic: the first inference otherwise pays a ~20s model-load +
+    MPS kernel-compile cost that would land on the first real user. Warming
+    at boot moves that cost to where it belongs.
+    """
+    logger.info("Warming up reranker at startup...")
+    warmup_reranker()
+    logger.info("Reranker warm; ready to serve.")
+    yield
+
 
 app = FastAPI(
     title="Poshan Saathi API",
     description="Prenatal nutrition RAG chatbot for women in India.",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 # CORS: allow the Next.js frontend (localhost:3000 in dev, your Vercel

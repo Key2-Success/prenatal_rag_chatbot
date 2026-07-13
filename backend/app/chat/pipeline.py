@@ -29,7 +29,7 @@ from backend.app.models.schemas import (
     Source,
     UserProfile,
 )
-from backend.app.observability import observe, update_current_span
+from backend.app.observability import observe, score_current_trace, update_current_span
 from backend.app.rag.retriever import RetrievedChunk, retrieve_and_rerank
 from backend.app.timing import record_stage
 
@@ -248,6 +248,9 @@ def run_chat(
         update_current_span(
             output={"response_type": response_type.value, "answer": canned},
         )
+        score_current_trace(
+            name="response_type", value=response_type.value, data_type="CATEGORICAL"
+        )
         return ChatResponse(response_type=response_type, answer=canned)
 
     # 2. Retrieve: recall from all sources, rerank, order by source priority.
@@ -265,6 +268,11 @@ def run_chat(
                 "response_type": ResponseType.no_results.value,
                 "answer": NO_RESULTS_RESPONSE,
             },
+        )
+        score_current_trace(
+            name="response_type",
+            value=ResponseType.no_results.value,
+            data_type="CATEGORICAL",
         )
         return ChatResponse(
             response_type=ResponseType.no_results,
@@ -318,6 +326,11 @@ def run_chat(
                 "unanswerable": unanswerable,
             },
         )
+        score_current_trace(
+            name="response_type",
+            value=ResponseType.no_results.value,
+            data_type="CATEGORICAL",
+        )
         return ChatResponse(
             response_type=ResponseType.no_results,
             answer=NO_RESULTS_RESPONSE,
@@ -348,6 +361,9 @@ def run_chat(
             "answers_question": answerable,
             "validator_corrected": not validation.is_compliant,
         },
+    )
+    score_current_trace(
+        name="response_type", value=ResponseType.answer.value, data_type="CATEGORICAL"
     )
     # Eval-only side channel — only populated when the caller opts in.
     # Captures both the retrieved chunks (for RAGAS dataset construction)

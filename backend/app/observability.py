@@ -30,6 +30,11 @@ API exposed (stable whether Langfuse is enabled or not):
     scripts (eval runner, ingestion) — uvicorn keeps the process alive
     long enough for the background flusher to drain on its own.
 
+  score_current_trace(name=..., value=..., data_type=...)
+    Attach a filterable/chartable score to the current trace. Used for
+    outcome dimensions known only at the end of the pipeline (response_type)
+    that propagate_attributes — applied at entry — can't capture.
+
 Design choice: this shim deliberately exposes a NARROWER API than Langfuse
 itself. We forward only what the pipeline actually uses. Adding a feature
 means adding it here intentionally — easier to reason about than a wide
@@ -114,6 +119,17 @@ if settings.langfuse_enabled:
         """Drain buffered events. Call at the end of scripts."""
         _client.flush()
 
+    def score_current_trace(**kwargs: Any) -> None:
+        """Attach a score to the current trace (numeric / categorical / boolean).
+
+        Used for filterable outcome dimensions known only at the END of the
+        pipeline — e.g. response_type — which propagate_attributes (applied at
+        request entry) cannot capture. Scores are filterable and chartable in
+        the Langfuse UI, so they power "how many emergencies / no_results /
+        answers" breakdowns.
+        """
+        _client.score_current_trace(**kwargs)
+
 else:
     # No-op fallback. The decorator returns the function untouched so there
     # is zero runtime overhead when Langfuse is disabled (no extra frames,
@@ -131,4 +147,7 @@ else:
         yield
 
     def flush() -> None:
+        return None
+
+    def score_current_trace(**kwargs: Any) -> None:
         return None

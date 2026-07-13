@@ -18,11 +18,43 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.app.chat.pipeline import run_chat
-from backend.app.models.schemas import ChatRequest, ChatResponse
+from backend.app.models.schemas import ChatRequest, ChatResponse, UserProfile
 from backend.app.observability import propagate_attributes
 from backend.app.rag.retriever import warmup_reranker
 
 logger = logging.getLogger(__name__)
+
+
+def _trimester(week: int) -> str:
+    """Map pregnancy week → trimester bucket ("1" | "2" | "3")."""
+    if week <= 13:
+        return "1"
+    if week <= 27:
+        return "2"
+    return "3"
+
+
+def _trace_attrs(profile: UserProfile) -> dict:
+    """
+    Profile-derived tags + metadata for Langfuse trace filtering.
+
+    These are known at request entry, so they ride on propagate_attributes
+    (the Langfuse v4 idiom for correlating attributes — they apply to the
+    trace and every child observation). Outcome dimensions known only later,
+    like response_type, are attached as scores inside the pipeline instead.
+    """
+    diet = profile.diet_type.value
+    trimester = _trimester(profile.pregnancy_week)
+    conditions = [c.value for c in profile.medical_conditions]
+    tags = [f"diet:{diet}", f"trimester:{trimester}"]
+    tags += [f"condition:{c}" for c in conditions] or ["condition:none"]
+    metadata = {
+        "diet_type": diet,
+        "trimester": trimester,
+        "pregnancy_week": str(profile.pregnancy_week),
+        "medical_conditions": ", ".join(conditions) or "none",
+    }
+    return {"tags": tags, "metadata": metadata}
 
 
 @asynccontextmanager
@@ -92,7 +124,7 @@ def chat(request: ChatRequest, http_request: Request):
         # attrs (session_id, user_id, tags). It threads them through every
         # observation created inside the `with` block, including the parent
         # @observe span on run_chat. Keeps run_chat free of infra concerns.
-        with propagate_attributes(session_id=request_id):
+        with propagate_attributes(session_id=request_id, **_trace_attrs(request.user_profile)):
             return run_chat(request)
     except Exception:
         # Log internally with traceback — never echo internals to clients.

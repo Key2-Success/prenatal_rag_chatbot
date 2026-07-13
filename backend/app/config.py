@@ -90,6 +90,19 @@ class Settings(BaseSettings):
     # downloaded once to ~/.cache/huggingface (~600MB) and cached across runs.
     # Override per-run via env, e.g. RERANKER_MODEL=BAAI/bge-reranker-large.
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
+    # Reranker backend:
+    #   "local"    → self-hosted sentence-transformers on this machine's CPU/MPS.
+    #                No per-call cost, but needs ~2GB RAM + torch in the image.
+    #   "pinecone" → Pinecone Inference's hosted copy of the SAME model. No local
+    #                model/RAM/torch, so the deployed backend fits a free tier.
+    #                Free tier caps at 500 reranks/month (fine behind our rate
+    #                limits). Same weights → ordering preserved.
+    # Local is the dev default; set RERANKER_BACKEND=pinecone for deployment.
+    reranker_backend: str = "local"
+    # Model id for the hosted (Pinecone Inference) reranker. Same weights as the
+    # local BAAI/bge-reranker-v2-m3; Pinecone returns already-normalised
+    # relevance scores (no client-side sigmoid needed).
+    pinecone_rerank_model: str = "bge-reranker-v2-m3"
 
     # --- LLM knobs ---
     # Answer model. Switched nano → mini after an A/B (2026-06-27): faithfulness

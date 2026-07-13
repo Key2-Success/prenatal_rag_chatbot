@@ -457,6 +457,69 @@ def _build_reranker_query(base_query: str, profile) -> str:
     return f"{diet_phrase} pregnant woman {health_phrase} ({trimester}): {base_query}"
 
 
+def _rerank(query: str, texts: list[str]) -> np.ndarray:
+    """
+    Score each text against the query with the bge-reranker-v2-m3 cross-encoder.
+
+    Returns a numpy array of relevance scores in [0, 1] aligned to `texts` order
+    (higher = more relevant). Two interchangeable backends
+    (settings.reranker_backend), both the same model so ordering is preserved:
+
+      - "local":    self-hosted sentence-transformers on this machine's CPU/MPS.
+      - "pinecone": Pinecone Inference's hosted copy — no local model, RAM, or
+                    torch, so the deployed backend fits a free tier.
+    """
+    if settings.reranker_backend == "pinecone":
+        return _rerank_pinecone(query, texts)
+    return _rerank_local(query, texts)
+
+
+def _rerank_local(query: str, texts: list[str]) -> np.ndarray:
+    """
+    Self-hosted cross-encoder. predict() returns raw logits in input order; we
+    sigmoid-normalise to a 0-1 score so the numbers in eval reports and Langfuse
+    traces are comparable to Pinecone's hosted output of the same model.
+
+    Lock around .predict() because PyTorch MPS (Apple Silicon Metal) is NOT
+    reliably thread-safe under concurrent forward passes — it can deadlock when
+    multiple threads call .predict() on the same model instance. The lock
+    serialises just the model call, not the surrounding pipeline, so OpenAI /
+    Pinecone I/O still parallelises normally.
+    """
+    with record_stage("rerank_load"):
+        reranker = _get_reranker()
+    pairs = [(query, t) for t in texts]
+    with record_stage("rerank_infer"):
+        with _reranker_lock:
+            raw_scores = reranker.predict(pairs)
+        return 1.0 / (1.0 + np.exp(-np.asarray(raw_scores)))  # sigmoid
+
+
+def _rerank_pinecone(query: str, texts: list[str]) -> np.ndarray:
+    """
+    Hosted rerank via Pinecone Inference (same bge-reranker-v2-m3 weights). The
+    API returns already-normalised relevance scores sorted by relevance; we map
+    them back to input order so the downstream argsort/top_k logic is unchanged.
+    No local model, so rerank_load is ~free — only the API call is timed.
+    """
+    with record_stage("rerank_infer"):
+        result = _get_client().inference.rerank(
+            model=settings.pinecone_rerank_model,
+            query=query,
+            documents=texts,
+            top_n=len(texts),
+            return_documents=False,
+        )
+    scores = np.zeros(len(texts), dtype=float)
+    for item in result.data:
+        # Items expose both attribute and mapping access depending on SDK
+        # version; support both so a minor bump doesn't silently break scoring.
+        idx = item["index"] if isinstance(item, dict) else item.index
+        score = item["score"] if isinstance(item, dict) else item.score
+        scores[int(idx)] = float(score)
+    return scores
+
+
 @observe(name="retrieve_and_rerank")
 def retrieve_and_rerank(query: str, profile=None) -> list[RetrievedChunk]:
     """
@@ -544,33 +607,17 @@ def retrieve_and_rerank(query: str, profile=None) -> list[RetrievedChunk]:
         update_current_span(output={"chunks_returned": 0, "sources_hit": sources_hit})
         return []
 
-    # Stage 2: rerank. Self-hosted bge-reranker-v2-m3 cross-encoder via
-    # sentence-transformers. The reranker is called locally — no API rate
-    # limit and no per-call cost. predict() returns raw logits in input
-    # order; we sigmoid-normalise to a 0-1 score so the numbers in eval
-    # reports and Langfuse traces are comparable to the previous
-    # Pinecone-Inference-hosted output of the same model.
+    # Stage 2: rerank with the bge-reranker-v2-m3 cross-encoder. Two
+    # interchangeable backends (settings.reranker_backend) — same model weights,
+    # so ordering is preserved; see _rerank(). Both return a 0-1 relevance score
+    # per candidate in input order.
     #
-    # Lock around .predict() because PyTorch MPS (Apple Silicon Metal) is
-    # NOT reliably thread-safe under concurrent model forward passes — it
-    # can deadlock or stall when multiple threads call .predict() on the
-    # same model instance. The lock serialises just the GPU call, not the
-    # surrounding pipeline, so OpenAI API calls (embedding, classifier,
-    # answer LLM) and Pinecone queries still parallelise normally with
-    # --parallel-runs. Reranker work is ~13s of a ~5min eval, so this
-    # serialisation costs little but prevents hangs.
-    with record_stage("rerank_load"):
-        reranker = _get_reranker()
     # Build a profile-aware reranker query in natural prose so the cross-encoder
     # can attend dietary/medical constraints directly against chunk tokens.
     # Uses bm25_query (the clean, tag-stripped query) as the base — the [Diet: X]
     # tag was for the embedding channel only, not for cross-encoder input.
     reranker_query = _build_reranker_query(bm25_query, profile)
-    pairs = [(reranker_query, c.text) for c in all_candidates]
-    with record_stage("rerank_infer"):
-        with _reranker_lock:
-            raw_scores = reranker.predict(pairs)
-        scores = 1.0 / (1.0 + np.exp(-np.asarray(raw_scores)))  # sigmoid
+    scores = _rerank(reranker_query, [c.text for c in all_candidates])
 
     # Pick the top_k candidates by reranker score. The returned indices point
     # back into all_candidates so we can preserve full metadata.

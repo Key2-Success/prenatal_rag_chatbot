@@ -205,6 +205,30 @@ class Settings(BaseSettings):
     # same label, so default to deterministic.
     classifier_temperature: float = 0.0
 
+    # --- Security / rate limiting (public deployment) ---
+    # CORS allowed origins, comma-separated. Dev default is the local Next.js
+    # frontend; in prod set CORS_ALLOW_ORIGINS=https://your-app.vercel.app.
+    cors_allow_origins: str = "http://localhost:3000"
+    # Per-IP rate limits on /chat (slowapi). The burst cap (per minute) stops a
+    # tight loop; the daily cap bounds one visitor's total — no legitimate user
+    # needs 50 nutrition questions a day.
+    rate_limit_per_minute: int = 10
+    rate_limit_per_day: int = 50
+    # Global daily request budget across ALL clients — the hard cost ceiling a
+    # botnet (many IPs, each under the per-IP caps) can't evade. When exceeded,
+    # /chat returns 503 until UTC midnight. In-memory + single-instance: fine
+    # for one container; use a shared counter (Redis) if you scale out.
+    daily_request_budget: int = 500
+    # Reject request bodies larger than this many bytes before parsing — a cheap
+    # backstop to the message max_length=1000 already on ChatRequest (a huge
+    # medical_conditions list or malformed body is rejected before any work).
+    max_body_bytes: int = 16384
+
+    @property
+    def cors_allow_origins_list(self) -> list[str]:
+        """CORS origins as a list (env stores them comma-separated)."""
+        return [o.strip() for o in self.cors_allow_origins.split(",") if o.strip()]
+
     # --- Observability (Langfuse) ---
     # Optional. When both keys are set, the OpenAI client is auto-wrapped
     # so every embedding / chat / parse call shows up in the Langfuse trace

@@ -1,6 +1,11 @@
 # API
 fastapi==0.115.6
 uvicorn[standard]==0.32.1
+# Per-IP + global rate limiting on the public /chat endpoint. slowapi wraps
+# the `limits` library; its only hard dependency is limits>=2.3, so no conflict
+# with the fastapi/starlette pins above. In-memory storage (single instance) —
+# add the `redis` extra + a shared store if the backend scales horizontally.
+slowapi==0.1.10
 
 # RAG & Embeddings
 openai==1.58.1

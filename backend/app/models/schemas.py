@@ -322,7 +322,7 @@ class UserProfile(BaseModel):
 # --- Chat request / response ------------------------------------------------
 
 class ChatRequest(BaseModel):
-    message: str = Field(..., min_length=1, max_length=1000)
+    message: str = Field(..., min_length=1, max_length=500)
     user_profile: UserProfile
 
 

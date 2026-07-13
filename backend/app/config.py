@@ -71,12 +71,15 @@ class Settings(BaseSettings):
     app_env: str = "development"
 
     # --- Retrieval knobs ---
-    # Pinecone cosine scores typically land in [0.0, 1.0] for related text.
-    # Lower → more recall, more noise. Higher → more precision, more fallbacks.
-    # Applies during the recall phase (before reranking) as a noise floor —
-    # chunks that don't clear this threshold are excluded from the reranker input.
-    # Override per-run via env, e.g. `SIMILARITY_THRESHOLD=0.55 python -m eval.run_eval`.
-    similarity_threshold: float = 0.3
+    # Recall-phase noise floor: chunks scoring below this are excluded from the
+    # reranker input (applied BEFORE reranking).
+    # Recalibrated to 0.05 for HYBRID retrieval: with hybrid_alpha=0.75 the score
+    # is a client-side-scaled dense+sparse blend, not a pure cosine, so it lands
+    # in a much lower range than the old 0.3 (which was calibrated for pure cosine
+    # and over-filtered under hybrid). 0.05 is a low-but-nonzero floor — per R30,
+    # recalibrate the filter, never zero it.
+    # Override per-run via env, e.g. `SIMILARITY_THRESHOLD=0.1 python -m eval.ragas_eval`.
+    similarity_threshold: float = 0.05
     # Final number of chunks returned to the LLM context window.
     top_k: int = 3
     # Candidates fetched per source during the recall phase (Stage 1).

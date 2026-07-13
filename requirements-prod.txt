@@ -1,0 +1,32 @@
+# Runtime-only dependencies for the deployed backend.
+#
+# This is the FULL requirements.txt minus everything that's only needed at
+# ingest time (LlamaParse / llama-index, langchain chunking, tiktoken),
+# eval time (ragas, langchain-openai/anthropic, pyyaml, pandas), or test time
+# (pytest, httpx) — and crucially minus sentence-transformers/torch, because
+# the deployed backend runs RERANKER_BACKEND=pinecone (hosted rerank, no local
+# model). That keeps the image small enough for a free tier.
+#
+# Verified: `import backend.app.main` loads none of the excluded packages
+# (chunker's ingest deps are decoupled via backend/app/rag/models.py).
+
+# API
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+slowapi==0.1.10
+
+# LLM + vector search + hybrid BM25 (query-time). pinecone-text base install is
+# torch-free — its torch/transformers deps are behind the splade/dense extras,
+# which we do not install.
+openai==1.58.1
+pinecone==5.4.2
+pinecone-text>=0.11,<0.12
+numpy>=1.21.5
+
+# Config
+pydantic>=2.10,<3
+pydantic-settings==2.7.0
+python-dotenv==1.0.1
+
+# Observability (optional at runtime — imported only when LANGFUSE keys are set)
+langfuse>=4.0.0,<5.0.0

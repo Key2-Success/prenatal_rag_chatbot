@@ -38,7 +38,7 @@ from pydantic import BaseModel
 
 from backend.app.config import PROJECT_ROOT, settings
 from backend.app.observability import observe, update_current_span
-from backend.app.rag.chunker import Chunk
+from backend.app.rag.models import Chunk
 from backend.app.timing import record_stage
 from backend.app.rag.embedder import EMBEDDING_DIMENSIONS, embed_query
 from backend.app.sources import priority_order, priority_rank_by_org

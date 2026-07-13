@@ -144,16 +144,10 @@ def _deepest_heading(metadata: dict) -> str:
     return ""
 
 
-class Chunk(BaseModel):
-    """One unit of text ready for embedding + Pinecone upsert."""
-    text: str
-    source_file: str
-    org_display_name: str
-    doc_title: str
-    doc_reference_order: int
-    year_published: int
-    page_number: int   # page where this chunk begins
-    section_heading: str = ""  # deepest markdown header enclosing this chunk
+# Chunk moved to models.py so the query-time path (retriever) can import it
+# without loading this module's ingest-only heavyweight deps. Re-exported here
+# so existing `from ...chunker import Chunk` call sites (ingest scripts) still work.
+from backend.app.rag.models import Chunk  # noqa: E402  (re-export)
 
 
 class _Page(BaseModel):

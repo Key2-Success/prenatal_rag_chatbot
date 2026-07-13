@@ -1,0 +1,21 @@
+# Keep the build context (and image) small: only backend/ + the two runtime
+# data JSONs (copied explicitly in the Dockerfile) are needed.
+.venv/
+frontend/
+node_modules/
+.git/
+.github/
+eval/
+scripts/
+tests/
+**/__pycache__/
+*.pyc
+*.pyo
+.env
+.next/
+# Source PDFs are ingest-only and large — never needed at runtime.
+data/*.pdf
+# Docs / local artifacts.
+*.md
+.claude/
+.pytest_cache/

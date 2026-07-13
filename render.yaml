@@ -1,0 +1,36 @@
+# Render Blueprint for the backend API.
+# Deploy: Render Dashboard → New → Blueprint → point at this repo. Render reads
+# this file, builds the Dockerfile, and creates the service. Set the secret env
+# vars (sync: false below) in the dashboard when prompted.
+#
+# Free plan spins down after ~15 min idle; the first request after that pays a
+# cold start (~30-60s). Fine for a portfolio demo. Upgrade the plan for always-on.
+services:
+  - type: web
+    name: poshan-saathi-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      # Use Pinecone's hosted rerank so the image needs no torch/model.
+      - key: RERANKER_BACKEND
+        value: pinecone
+      # Lock CORS to your Vercel frontend URL (set in the dashboard), e.g.
+      # https://poshan-saathi.vercel.app
+      - key: CORS_ALLOW_ORIGINS
+        sync: false
+      # Secrets — set these in the Render dashboard, not in the repo.
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: PINECONE_API_KEY
+        sync: false
+      # Observability (optional). Leave unset to disable Langfuse.
+      - key: LANGFUSE_PUBLIC_KEY
+        sync: false
+      - key: LANGFUSE_SECRET_KEY
+        sync: false
+      - key: LANGFUSE_HOST
+        value: https://us.cloud.langfuse.com
+      # Rate limits / budget default to sane values (see config.py); override
+      # here only if you want different caps than 10/min, 50/day, 500/day.

@@ -10,6 +10,7 @@ Local dev:
     open http://localhost:8000/docs   # interactive Swagger UI
 """
 
+import ipaddress
 import logging
 import threading
 import uuid
@@ -181,20 +182,60 @@ def _parse_user_agent(ua: str) -> dict[str, str]:
     return {"device_type": device, "os": os_name, "browser": browser}
 
 
+# Country lookups are cached per IP (only successful ones) and resolved in a
+# background thread, so geo never adds latency to the request path.
+_country_cache: dict[str, str] = {}
+_country_lock = threading.Lock()
+
+
+def _lookup_country(ip: str) -> None:
+    """Best-effort IP → country code, cached. Runs in a background thread."""
+    try:
+        r = httpx.get(f"https://ipwho.is/{ip}", params={"fields": "country_code"}, timeout=2.5)
+        cc = (r.json() or {}).get("country_code")
+    except Exception:  # noqa: BLE001 — geo is best-effort, never fatal
+        cc = None
+    if cc:
+        with _country_lock:
+            _country_cache[ip] = cc
+
+
+def _client_country(ip: str) -> str:
+    """
+    Coarse country code for analytics. Never blocks: returns a cached value, or
+    "pending" while a background thread fills the cache for this IP's *next*
+    request. Private/loopback IPs (local dev) return "local". Country only — no
+    city, and we never store the raw IP itself.
+    """
+    try:
+        addr = ipaddress.ip_address(ip)
+        if addr.is_private or addr.is_loopback:
+            return "local"
+    except ValueError:
+        return "unknown"
+    with _country_lock:
+        if ip in _country_cache:
+            return _country_cache[ip]
+    threading.Thread(target=_lookup_country, args=(ip,), daemon=True).start()
+    return "pending"
+
+
 def _client_attrs(request: Request) -> dict:
     """
     Anonymous, header-derived trace attributes for audience analytics in
     Langfuse. There's no auth, so user_id is a client-generated anonymous id
     (a UUID the frontend keeps in localStorage) — enough to count unique
     visitors and group their sessions without collecting any real identity.
-    Device/OS/browser come from the User-Agent, language from Accept-Language.
-    No IP or precise location is logged — this is a sensitive domain and we keep
-    the footprint coarse and anonymous.
+    Device/OS/browser come from the User-Agent, language from Accept-Language,
+    and a coarse **country** code from a cached, non-blocking geo-IP lookup.
+    We keep the footprint coarse and anonymous — country only (no city), and the
+    raw IP is used transiently for the lookup, never logged.
     """
     metadata = _parse_user_agent(request.headers.get("user-agent", ""))
     lang = request.headers.get("accept-language", "")
     if lang:
         metadata["language"] = lang.split(",")[0].split(";")[0].strip()
+    metadata["country"] = _client_country(_client_ip(request))
     attrs: dict = {"metadata": metadata}
     anon_id = request.headers.get("x-anon-id")
     if anon_id:
@@ -283,6 +324,21 @@ async def request_id_middleware(request: Request, call_next):
     response = await call_next(request)
     response.headers["x-request-id"] = request_id
     return response
+
+
+@app.get("/", tags=["Meta"], include_in_schema=False)
+def root():
+    """
+    Friendly root. The API has no web UI of its own (the frontend is a separate
+    Next.js app), so point anyone who pokes the bare URL at the docs + health
+    instead of returning a bare 404.
+    """
+    return {
+        "service": "Poshan Saathi API",
+        "status": "ok",
+        "docs": "/docs",
+        "health": "/health",
+    }
 
 
 @app.get("/health", tags=["Meta"])

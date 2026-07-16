@@ -113,14 +113,26 @@ def _trace_attrs(profile: UserProfile) -> dict:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
-    Startup/shutdown hook. Warm the cross-encoder reranker before the server
-    accepts traffic: the first inference otherwise pays a ~20s model-load +
-    MPS kernel-compile cost that would land on the first real user. Warming
-    at boot moves that cost to where it belongs.
+    Startup/shutdown hook.
+
+    For the LOCAL reranker backend, warm the cross-encoder before the server
+    accepts traffic — the first inference otherwise pays a ~20s model-load +
+    kernel-compile cost that would land on the first real user.
+
+    For the hosted (pinecone) backend there is no local model to warm — and the
+    lean production image deliberately omits sentence-transformers / torch — so
+    warming is skipped. Calling warmup_reranker() there would import
+    sentence-transformers and crash the container on boot.
     """
-    logger.info("Warming up reranker at startup...")
-    warmup_reranker()
-    logger.info("Reranker warm; ready to serve.")
+    if settings.reranker_backend == "local":
+        logger.info("Warming up local reranker at startup...")
+        warmup_reranker()
+        logger.info("Reranker warm; ready to serve.")
+    else:
+        logger.info(
+            "Reranker backend '%s' is hosted — skipping local warmup.",
+            settings.reranker_backend,
+        )
     yield
 
 

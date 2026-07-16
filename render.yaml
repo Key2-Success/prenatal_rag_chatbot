@@ -32,5 +32,12 @@ services:
         sync: false
       - key: LANGFUSE_HOST
         value: https://us.cloud.langfuse.com
+      # Optional: persistent daily-budget counter so the cap survives spin-down
+      # restarts. Create a free Upstash Redis DB and paste its REST URL + token.
+      # Leave unset to use the in-memory counter.
+      - key: UPSTASH_REDIS_REST_URL
+        sync: false
+      - key: UPSTASH_REDIS_REST_TOKEN
+        sync: false
       # Rate limits / budget default to sane values (see config.py); override
       # here only if you want different caps than 10/min, 50/day, 500/day.

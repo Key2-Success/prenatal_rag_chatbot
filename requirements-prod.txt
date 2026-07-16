@@ -30,3 +30,7 @@ python-dotenv==1.0.1
 
 # Observability (optional at runtime — imported only when LANGFUSE keys are set)
 langfuse>=4.0.0,<5.0.0
+
+# HTTP client for the optional Upstash Redis budget backend (REST API). Also a
+# transitive dep of openai, but pinned here since main.py imports it directly.
+httpx==0.28.1

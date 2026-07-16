@@ -239,6 +239,14 @@ class Settings(BaseSettings):
     # backstop to the message max_length=1000 already on ChatRequest (a huge
     # medical_conditions list or malformed body is rejected before any work).
     max_body_bytes: int = 16384
+    # Persistent budget backend (optional — Upstash Redis via its REST API).
+    # When BOTH are set, the global daily request budget is counted in Upstash
+    # instead of an in-memory counter, so the cap SURVIVES restarts. This
+    # matters on Render free, which spins down when idle — an in-memory counter
+    # would reset on every wake, letting an attacker exceed the daily cap by
+    # triggering restarts. Unset → falls back to the in-memory counter.
+    upstash_redis_rest_url: str | None = None
+    upstash_redis_rest_token: str | None = None
 
     @property
     def cors_allow_origins_list(self) -> list[str]:

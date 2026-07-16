@@ -16,6 +16,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timezone
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -61,21 +62,56 @@ _budget_day: date | None = None
 _budget_count = 0
 
 
-def _enforce_daily_budget() -> None:
-    """Count today's served request; raise 503 once over the daily budget."""
+def _incr_daily_budget_memory(today: date) -> int:
+    """In-memory daily counter (resets on restart). Returns the new count."""
     global _budget_day, _budget_count
-    today = datetime.now(timezone.utc).date()
     with _budget_lock:
         if today != _budget_day:
             _budget_day = today
             _budget_count = 0
-        if _budget_count >= settings.daily_request_budget:
-            raise HTTPException(
-                status_code=503,
-                detail="The service has reached its daily capacity. "
-                "Please try again tomorrow.",
-            )
         _budget_count += 1
+        return _budget_count
+
+
+def _incr_daily_budget_redis(day_key: str) -> int:
+    """
+    Increment today's counter in Upstash Redis (REST) and return the new count.
+    Persists across restarts so Render's spin-down can't reset the cap; sets a
+    48h TTL on the first hit of the day so keys self-clean.
+    """
+    base = settings.upstash_redis_rest_url.rstrip("/")
+    headers = {"Authorization": f"Bearer {settings.upstash_redis_rest_token}"}
+    with httpx.Client(timeout=3.0) as client:
+        r = client.post(base, headers=headers, json=["INCR", day_key])
+        r.raise_for_status()
+        count = int(r.json()["result"])
+        if count == 1:
+            client.post(base, headers=headers, json=["EXPIRE", day_key, "172800"])
+    return count
+
+
+def _enforce_daily_budget() -> None:
+    """
+    Count today's served request across ALL clients; raise 503 once over the
+    daily budget. Uses Upstash Redis when configured (survives restarts), else
+    an in-memory counter. Redis failures fall back to memory — a flaky counter
+    must never take the app down, and the OpenAI hard cap is the true backstop.
+    """
+    today = datetime.now(timezone.utc).date()
+    if settings.upstash_redis_rest_url and settings.upstash_redis_rest_token:
+        try:
+            count = _incr_daily_budget_redis(f"budget:{today.isoformat()}")
+        except Exception as e:  # noqa: BLE001 — never let the counter break /chat
+            logger.warning("Upstash budget check failed (%s); using in-memory.", e)
+            count = _incr_daily_budget_memory(today)
+    else:
+        count = _incr_daily_budget_memory(today)
+    if count > settings.daily_request_budget:
+        raise HTTPException(
+            status_code=503,
+            detail="The service has reached its daily capacity. "
+            "Please try again tomorrow.",
+        )
 
 
 def _trimester(week: int) -> str:

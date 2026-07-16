@@ -44,8 +44,11 @@ out/
 # Eval run artifacts (generated locally; don't churn the repo)
 eval/results/
 
-# Generated ingest artifacts — re-created by `python -m scripts.ingest`
-data/bm25_encoder.json
+# data/bm25_encoder.json is a generated ingest artifact, but it IS tracked:
+# the deployed backend loads it at runtime (BM25 sparse vectors) and can't
+# regenerate it in prod (no ingest deps / corpus there), and Render builds from
+# the repo. Re-running `python -m scripts.ingest` will show it modified — commit
+# the update so the deployed encoder stays in sync with the index.
 
 # Derived metrics spreadsheet — regenerated from eval/results by
 # eval/build_metrics_xlsx.py after each eval; not tracked.

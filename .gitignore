@@ -46,3 +46,7 @@ eval/results/
 
 # Generated ingest artifacts — re-created by `python -m scripts.ingest`
 data/bm25_encoder.json
+
+# Derived metrics spreadsheet — regenerated from eval/results by
+# eval/build_metrics_xlsx.py after each eval; not tracked.
+ragas_metrics_over_time.xlsx

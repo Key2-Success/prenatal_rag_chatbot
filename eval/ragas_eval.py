@@ -1038,6 +1038,18 @@ def write_markdown_report(*args, run_id: str, **kwargs) -> Path:
     timestamp = run_id.removeprefix("eval_")
     content = _markdown_report(*args, timestamp=timestamp, **kwargs)
     path.write_text(content)
+
+    # Keep the aggregate metrics spreadsheet in sync with the reports on disk.
+    # Best-effort: a missing openpyxl or a parse hiccup must never fail the eval.
+    try:
+        from eval.build_metrics_xlsx import refresh_metrics_xlsx
+
+        out = refresh_metrics_xlsx()
+        if out is not None:
+            print(f"  Metrics sheet updated: {out.relative_to(PROJECT_ROOT)}")
+    except Exception as e:  # noqa: BLE001 — reporting must not break the eval
+        print(f"  (metrics sheet not updated: {e})")
+
     return path
 
 

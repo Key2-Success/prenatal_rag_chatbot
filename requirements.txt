@@ -63,6 +63,9 @@ httpx==0.28.1
 
 # Evaluation
 pyyaml==6.0.2
+# Metrics-over-time spreadsheet (eval/build_metrics_xlsx.py), auto-refreshed
+# after each ragas_eval run. Eval-only — deliberately NOT in requirements-prod.txt.
+openpyxl==3.1.5
 
 # Observability
 # Langfuse v4 SDK (package version 4.x) — current rewrite, OTel-based.

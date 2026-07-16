@@ -110,6 +110,62 @@ def _trace_attrs(profile: UserProfile) -> dict:
     return {"tags": tags, "metadata": metadata}
 
 
+def _parse_user_agent(ua: str) -> dict[str, str]:
+    """Lightweight User-Agent → device/os/browser (no external dependency)."""
+    u = ua.lower()
+    if "ipad" in u or ("tablet" in u and "mobile" not in u):
+        device = "tablet"
+    elif "mobi" in u or "iphone" in u or "android" in u:
+        device = "mobile"
+    else:
+        device = "desktop" if ua else "unknown"
+    if "iphone" in u or "ipad" in u:
+        os_name = "iOS"
+    elif "android" in u:
+        os_name = "Android"
+    elif "windows" in u:
+        os_name = "Windows"
+    elif "mac os x" in u or "macintosh" in u:
+        os_name = "macOS"
+    elif "linux" in u:
+        os_name = "Linux"
+    else:
+        os_name = "unknown"
+    # Order matters: Edge/Chrome UAs also contain "safari"/"chrome" tokens.
+    if "edg/" in u or "edgios" in u or "edga" in u:
+        browser = "Edge"
+    elif "firefox" in u or "fxios" in u:
+        browser = "Firefox"
+    elif "chrome" in u or "crios" in u:
+        browser = "Chrome"
+    elif "safari" in u:
+        browser = "Safari"
+    else:
+        browser = "unknown"
+    return {"device_type": device, "os": os_name, "browser": browser}
+
+
+def _client_attrs(request: Request) -> dict:
+    """
+    Anonymous, header-derived trace attributes for audience analytics in
+    Langfuse. There's no auth, so user_id is a client-generated anonymous id
+    (a UUID the frontend keeps in localStorage) — enough to count unique
+    visitors and group their sessions without collecting any real identity.
+    Device/OS/browser come from the User-Agent, language from Accept-Language.
+    No IP or precise location is logged — this is a sensitive domain and we keep
+    the footprint coarse and anonymous.
+    """
+    metadata = _parse_user_agent(request.headers.get("user-agent", ""))
+    lang = request.headers.get("accept-language", "")
+    if lang:
+        metadata["language"] = lang.split(",")[0].split(";")[0].strip()
+    attrs: dict = {"metadata": metadata}
+    anon_id = request.headers.get("x-anon-id")
+    if anon_id:
+        attrs["user_id"] = anon_id[:64]  # defensive length cap
+    return attrs
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -216,12 +272,24 @@ def chat(request: Request, body: ChatRequest):
     # Global daily cost ceiling. Checked AFTER per-IP rate limiting — slowapi
     # rejects over-limit requests before this runs, so they don't consume budget.
     _enforce_daily_budget()
+
+    # Trace attributes: profile-derived (diet/trimester/conditions) + anonymous
+    # client analytics (user_id, device/os/browser, language). Merged into one
+    # propagate_attributes call so they land on the trace and every child span.
+    profile_attrs = _trace_attrs(body.user_profile)
+    client = _client_attrs(request)
+    pa_kwargs = {
+        "session_id": request_id,
+        "tags": profile_attrs["tags"],
+        "metadata": {**profile_attrs["metadata"], **client["metadata"]},
+    }
+    if "user_id" in client:
+        pa_kwargs["user_id"] = client["user_id"]
     try:
-        # `propagate_attributes` is the Langfuse v4 idiom for trace-level
-        # attrs (session_id, tags, metadata). It threads them through every
-        # observation created inside the `with` block, including the parent
-        # @observe span on run_chat. Keeps run_chat free of infra concerns.
-        with propagate_attributes(session_id=request_id, **_trace_attrs(body.user_profile)):
+        # `propagate_attributes` is the Langfuse v4 idiom for trace-level attrs.
+        # It threads them through every observation created inside the block,
+        # including the parent @observe span on run_chat.
+        with propagate_attributes(**pa_kwargs):
             return run_chat(body)
     except Exception:
         # Log internally with traceback — never echo internals to clients.

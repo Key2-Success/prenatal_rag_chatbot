@@ -13,6 +13,26 @@ const API_BASE =
 
 export class ChatError extends Error {}
 
+/**
+ * A stable, anonymous per-browser id kept in localStorage. Sent as X-Anon-Id so
+ * Langfuse can count unique visitors and group their sessions — no login, no PII,
+ * just a random UUID this browser reuses. Falls back gracefully if storage is
+ * blocked (private mode) or we're not in a browser.
+ */
+function getAnonId(): string {
+  if (typeof window === "undefined") return "server";
+  try {
+    let id = localStorage.getItem("psaathi_anon_id");
+    if (!id) {
+      id = crypto.randomUUID?.() ?? Math.random().toString(36).slice(2);
+      localStorage.setItem("psaathi_anon_id", id);
+    }
+    return id;
+  } catch {
+    return "no-storage";
+  }
+}
+
 export async function sendChat(
   message: string,
   profile: UserProfile,
@@ -23,7 +43,10 @@ export async function sendChat(
   try {
     res = await fetch(`${API_BASE}/chat`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "X-Anon-Id": getAnonId(),
+      },
       body: JSON.stringify(body),
     });
   } catch {

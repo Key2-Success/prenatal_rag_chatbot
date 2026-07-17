@@ -147,6 +147,26 @@ def warmup_reranker() -> None:
     _ = 1.0 / (1.0 + np.exp(-np.asarray(raw)))  # exercise the sigmoid path too
 
 
+def warmup_retrieval() -> None:
+    """
+    Warm the shared retrieval path so the first real request doesn't pay lazy
+    init. Initialises the Pinecone index client (the control-plane calls in
+    get_index), loads the BM25 encoder from disk, and opens the OpenAI embedding
+    connection with a dummy embed.
+
+    Deliberately does NOT call the reranker: on the hosted (pinecone) backend
+    that would spend a free-tier rerank on every boot, and Render free restarts
+    often. Used by the server lifespan for BOTH backends; safe in the lean prod
+    image (touches no torch / sentence-transformers).
+    """
+    get_index()
+    _get_bm25_encoder()
+    try:
+        embed_query("pregnancy nutrition")
+    except Exception:  # noqa: BLE001 — embedding warmup is best-effort
+        pass
+
+
 def _get_reranker():
     """
     Return the cached cross-encoder reranker, loading on first call.

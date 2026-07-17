@@ -29,7 +29,7 @@ from backend.app.chat.pipeline import run_chat
 from backend.app.config import settings
 from backend.app.models.schemas import ChatRequest, ChatResponse, UserProfile
 from backend.app.observability import propagate_attributes
-from backend.app.rag.retriever import warmup_reranker
+from backend.app.rag.retriever import warmup_reranker, warmup_retrieval
 
 logger = logging.getLogger(__name__)
 
@@ -260,12 +260,14 @@ async def lifespan(app: FastAPI):
     if settings.reranker_backend == "local":
         logger.info("Warming up local reranker at startup...")
         warmup_reranker()
-        logger.info("Reranker warm; ready to serve.")
-    else:
-        logger.info(
-            "Reranker backend '%s' is hosted — skipping local warmup.",
-            settings.reranker_backend,
-        )
+    # Warm the shared retrieval path (Pinecone client, BM25 encoder, OpenAI
+    # embedding connection) for BOTH backends, so the first user request doesn't
+    # pay lazy init. Best-effort — warmup must never crash boot.
+    try:
+        warmup_retrieval()
+        logger.info("Retrieval warm; ready to serve.")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Retrieval warmup failed (%s); first request may be slow.", e)
     yield
 
 

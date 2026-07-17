@@ -151,9 +151,16 @@ function AssistantMessage({ response }: { response: ChatResponse }) {
       </div>
       {response.sources.length > 0 && (
         <div className="flex flex-wrap gap-1.5 pl-1">
-          {response.sources.map((s, i) => (
-            <SourcePill key={`${s.org_display_name}-${s.page}-${i}`} source={s} />
-          ))}
+          {/* Display sources by descending match % (relevance). Copy before
+              sorting so we don't mutate the response; the backend keeps them in
+              source-priority order (which the LLM context + routing eval rely
+              on) — this only changes the visual order of the pills. Stable sort
+              keeps priority order as the tiebreak for equal scores. */}
+          {[...response.sources]
+            .sort((a, b) => b.relevance_score - a.relevance_score)
+            .map((s, i) => (
+              <SourcePill key={`${s.org_display_name}-${s.page}-${i}`} source={s} />
+            ))}
         </div>
       )}
     </div>

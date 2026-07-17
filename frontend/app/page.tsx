@@ -12,11 +12,12 @@
  */
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Chat } from "@/components/Chat";
 import { ProfileForm } from "@/components/ProfileForm";
 import { ProfileSheet } from "@/components/ProfileSheet";
 import { Wordmark } from "@/components/Wordmark";
+import { warmUpBackend } from "@/lib/api";
 import type { UserProfile } from "@/lib/types";
 
 const dietDot: Record<UserProfile["diet_type"], string> = {
@@ -28,6 +29,13 @@ const dietDot: Record<UserProfile["diet_type"], string> = {
 export default function Home() {
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [editing, setEditing] = useState(false);
+
+  // Wake the backend the moment someone lands, so Render's ~1 min cold-start
+  // overlaps the time they spend filling out the profile form — by the time
+  // they start chatting it's already warm. Fires once; costs nothing (/health).
+  useEffect(() => {
+    warmUpBackend();
+  }, []);
 
   // --- Onboarding ---
   if (!profile) {

@@ -14,6 +14,18 @@ const API_BASE =
 export class ChatError extends Error {}
 
 /**
+ * Fire-and-forget wake-up ping, called when the landing page loads. On Render's
+ * free tier the backend sleeps after ~15 min idle and takes ~1 min to wake, so
+ * we kick off that wake-up *while the user fills out the profile form* — by the
+ * time they hit "Start chatting" it's warm. Hits /health only (no OpenAI /
+ * Pinecone work, so it's effectively free) and swallows all errors — it's purely
+ * opportunistic, never blocks or surfaces anything to the user.
+ */
+export function warmUpBackend(): void {
+  void fetch(`${API_BASE}/health`, { method: "GET" }).catch(() => {});
+}
+
+/**
  * A stable, anonymous per-browser id kept in localStorage. Sent as X-Anon-Id so
  * Langfuse can count unique visitors and group their sessions — no login, no PII,
  * just a random UUID this browser reuses. Falls back gracefully if storage is

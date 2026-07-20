@@ -691,6 +691,16 @@ _AMOUNT_PRESENCE_PATTERNS: list[re.Pattern] = [
         # directional / qualitative amounts — answer the "how much" axis without a number
         r"\b(?:limit|reduce|restrict|increase|avoid|minimi[sz]e|fewer|less|more|"
         r"moderate|adequate|enough|plenty|sufficient|extra)\b",
+        # explicit, honest acknowledgment that the source material gives no set
+        # figure — e.g. "they do not specify an exact amount to drink" (the
+        # water_intake case). This is NOT a bare-unit-word evasion (the failure
+        # mode the patterns above were tightened against): it's the answer
+        # directly addressing the quantity axis and reporting, correctly, that
+        # the guidelines don't give one. Routing that to no_results discards a
+        # true, grounded, still-useful answer in favour of a blanket "I don't
+        # have information" — worse for the user, not safer.
+        r"\bno (?:specific|exact|particular|fixed|set) (?:amount|quantity|figure)\b",
+        r"\b(?:do(?:es)?n?'?t|do(?:es)? not) specify\b",
     )
 ]
 

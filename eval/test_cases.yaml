@@ -60,16 +60,21 @@
 
 - id: water_intake
   category: core_nutrition
-  # The corpus has no water-intake guidance (only a GDM glucose-test mention
-  # of water). The honest behaviour is no_results, not a fabricated answer —
-  # the grounding validator strips the ungrounded hydration claim, leaving
-  # nothing, which the pipeline routes to NO_RESULTS_RESPONSE. This is a
-  # routing assertion (Layer 1), not a RAGAS answer-quality case. Future
-  # iteration: ingest documents covering hydration to make this answerable.
+  # The corpus HAS real hydration guidance (MoHFW p.49: "Drink water,
+  # buttermilk, soups, and other unsweetened healthy beverages instead of
+  # soda or fruit juices") — it just gives no exact glass/litre figure. This
+  # case used to route to no_results because check_answerability required a
+  # literal amount for any "how much/many" question, discarding an honest,
+  # grounded answer that explicitly says no exact figure is specified. Fixed
+  # 2026-07 by widening _AMOUNT_PRESENCE_PATTERNS to recognise that explicit
+  # acknowledgment as answering the quantity axis. `answer` is now the
+  # correct, intended behaviour — surfacing real guidance beats a blanket
+  # "I don't have information" when the source material does address the
+  # topic, just without a number.
   query: "How many glasses of water should I drink each day?"
   profile: priya
   expected:
-    behavior: no_results
+    behavior: answer
 
 # ---------- B. Personalization (6) ----------
 # Two slices of personalization, mirroring the schema in models/schemas.py:

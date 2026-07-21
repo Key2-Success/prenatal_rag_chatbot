@@ -6,7 +6,25 @@
  * We surface a typed error the UI can render calmly rather than throwing
  * raw fetch failures at the user.
  */
-import type { ChatRequest, ChatResponse, UserProfile } from "./types";
+import type { ChatRequest, ChatResponse, ChatTurn, UserProfile } from "./types";
+
+// History caps, kept in lockstep with schemas.py (ChatTurn / ChatRequest):
+// send at most the last 6 turns (3 exchanges — backend accepts 8; we stay
+// under), each clipped to the backend's 1500-char per-turn limit so a long
+// assistant answer can never 422 the request.
+const HISTORY_MAX_TURNS = 6;
+const HISTORY_MAX_CHARS = 1500;
+
+/** Clip the transcript tail to the backend's history caps. */
+function trimHistory(history: ChatTurn[]): ChatTurn[] {
+  return history.slice(-HISTORY_MAX_TURNS).map((t) => ({
+    role: t.role,
+    content:
+      t.content.length > HISTORY_MAX_CHARS
+        ? t.content.slice(0, HISTORY_MAX_CHARS)
+        : t.content,
+  }));
+}
 
 const API_BASE =
   process.env.NEXT_PUBLIC_API_URL?.replace(/\/$/, "") || "http://localhost:8000";
@@ -48,8 +66,13 @@ function getAnonId(): string {
 export async function sendChat(
   message: string,
   profile: UserProfile,
+  history: ChatTurn[] = [],
 ): Promise<ChatResponse> {
-  const body: ChatRequest = { message, user_profile: profile };
+  const body: ChatRequest = {
+    message,
+    user_profile: profile,
+    history: trimHistory(history),
+  };
 
   let res: Response;
   try {

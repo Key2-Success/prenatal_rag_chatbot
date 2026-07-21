@@ -50,10 +50,19 @@ export interface Source {
   relevance_score: number;
 }
 
+// ChatTurn — one prior conversation turn, replayed to the stateless backend
+// so the classifier and answer LLM see follow-ups in context. The browser
+// owns the transcript; the server stores nothing (schemas.py: ChatTurn).
+export interface ChatTurn {
+  role: "user" | "assistant";
+  content: string; // 1–1500 chars per turn; 8 turns max per request
+}
+
 // ChatRequest / ChatResponse — the /chat endpoint contract.
 export interface ChatRequest {
-  message: string; // 1–1000 chars
+  message: string; // 1–500 chars
   user_profile: UserProfile;
+  history: ChatTurn[]; // recent tail, oldest first
 }
 
 export interface ChatResponse {

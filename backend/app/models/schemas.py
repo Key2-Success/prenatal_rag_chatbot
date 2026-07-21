@@ -16,7 +16,7 @@ Personalisation architecture (see PreferenceEnum docstring for full detail):
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
@@ -321,9 +321,31 @@ class UserProfile(BaseModel):
 
 # --- Chat request / response ------------------------------------------------
 
+class ChatTurn(BaseModel):
+    """
+    One prior turn of the conversation, as replayed by the frontend.
+
+    The server is deliberately stateless (no session store): the browser owns
+    the transcript and sends the recent tail with each request. Caps exist for
+    abuse control — 8 turns × 1500 chars stays well inside the 16KB body limit
+    even with the profile and a max-length message.
+
+    Trust note: history is client-supplied and therefore forgeable (a caller
+    could fabricate assistant turns). It is used only as conversational context
+    for the classifier and answer LLM — never as a source of authority; both
+    keep their own system-prompt rules and the grounding/validator gates still
+    run on every answer.
+    """
+    role: Literal["user", "assistant"]
+    content: str = Field(..., min_length=1, max_length=1500)
+
+
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=500)
     user_profile: UserProfile
+    # Recent conversation tail, oldest first. Defaults to empty — single-turn
+    # callers (evals, scripts, curl) are unchanged.
+    history: list[ChatTurn] = Field(default_factory=list, max_length=8)
 
 
 class Source(BaseModel):

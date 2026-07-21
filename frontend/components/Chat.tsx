@@ -196,6 +196,18 @@ export function Chat({ profile }: { profile: UserProfile }) {
     });
   }, [messages, loading]);
 
+  // Replay the transcript tail to the stateless backend so follow-ups like
+  // "what about <food>?" are classified and answered in context. User turns
+  // always count; assistant turns only when they were real answers — canned
+  // refusals and error bubbles carry no topic and would just add noise.
+  const toHistory = (msgs: Message[]) =>
+    msgs.flatMap((m): { role: "user" | "assistant"; content: string }[] => {
+      if (m.role === "user") return [{ role: "user", content: m.text }];
+      if (m.role === "assistant" && m.response.response_type === "answer")
+        return [{ role: "assistant", content: m.response.answer }];
+      return [];
+    });
+
   const send = async () => {
     const text = input.trim();
     if (!text || loading) return;
@@ -203,7 +215,7 @@ export function Chat({ profile }: { profile: UserProfile }) {
     setMessages((m) => [...m, { role: "user", text }]);
     setLoading(true);
     try {
-      const response = await sendChat(text, profile);
+      const response = await sendChat(text, profile, toHistory(messages));
       setMessages((m) => [...m, { role: "assistant", response }]);
     } catch (e) {
       const msg =

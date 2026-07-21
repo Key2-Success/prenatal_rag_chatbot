@@ -25,6 +25,7 @@ from backend.app.config import settings
 from backend.app.models.schemas import (
     ChatRequest,
     ChatResponse,
+    ChatTurn,
     ResponseType,
     Source,
     UserProfile,
@@ -166,24 +167,39 @@ def _build_user_message(profile: UserProfile, context: str, question: str) -> st
 
 
 @observe(name="answer_llm")
-def _call_llm(profile: UserProfile, chunks: list[RetrievedChunk], question: str) -> str:
-    """Send system+user messages to the LLM and return the trimmed answer."""
+def _call_llm(
+    profile: UserProfile,
+    chunks: list[RetrievedChunk],
+    question: str,
+    history: list[ChatTurn] | None = None,
+) -> str:
+    """Send system+history+user messages to the LLM and return the trimmed answer."""
     # Explicit input — only the question and a compact retrieval summary.
     # Avoids dumping the full UserProfile object and full chunk texts into
     # the parent span (the wrapped OpenAI call beneath captures the actual
     # prompt sent to the model anyway).
     update_current_span(input={
         "question": question,
+        "n_history": len(history) if history else 0,
         "retrieved_pages": [
             f"{c.org_display_name} p.{c.page_number}" for c in chunks
         ],
         "prompt_version": PROMPT_VERSION,
     })
+    # Prior turns ride as native chat messages between the system prompt and
+    # the final composed user message, so follow-ups ("what about X?") read
+    # coherently. History is conversational context only — the system prompt's
+    # grounding rules and the retrieved context stay the sole source of facts,
+    # and the review/validator gates still run on the result.
+    history_messages = [
+        {"role": t.role, "content": t.content} for t in (history or [])
+    ]
     response = get_openai_client().chat.completions.create(
         model=settings.llm_model,
         temperature=settings.llm_temperature,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
+            *history_messages,
             {"role": "user", "content": _build_user_message(
                 profile=profile,
                 context=_format_context(chunks),
@@ -232,6 +248,7 @@ def run_chat(
     update_current_span(
         input={
             "message": request.message,
+            "n_history": len(request.history),
             "pregnancy_week": profile.pregnancy_week,
             "diet_type": profile.diet_type.value,
             "medical_conditions": [c.value for c in profile.medical_conditions],
@@ -241,7 +258,7 @@ def run_chat(
     # 1. Triage the message. Emergency / out_of_scope short-circuit before
     #    any retrieval or answer-LLM cost.
     with record_stage("classify_message"):
-        label = classify_message(request.message)
+        label = classify_message(request.message, history=request.history)
     short_circuit = _SHORT_CIRCUIT_BY_LABEL.get(label)
     if short_circuit is not None:
         response_type, canned = short_circuit
@@ -281,7 +298,7 @@ def run_chat(
 
     # 4. Generate the answer.
     with record_stage("answer_llm"):
-        answer = _call_llm(profile, chunks, request.message)
+        answer = _call_llm(profile, chunks, request.message, history=request.history)
 
     from backend.app.chat.validator import (
         check_answerability,

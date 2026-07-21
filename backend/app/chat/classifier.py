@@ -37,6 +37,7 @@ from pydantic import BaseModel
 
 from backend.app.clients import get_openai_client
 from backend.app.config import settings
+from backend.app.models.schemas import ChatTurn
 from backend.app.observability import observe, update_current_span
 
 logger = logging.getLogger(__name__)
@@ -67,7 +68,7 @@ class ClassificationResult(BaseModel):
 #  - "When in doubt, prefer in_scope" biases the classifier toward letting
 #    the answer LLM handle ambiguous cases — its system prompt also enforces
 #    scope, so we don't need to be over-aggressive here.
-PROMPT_VERSION = "v1.0"
+PROMPT_VERSION = "v1.2"  # v1.1: conversation-continuity rules + history block; v1.2: food/ingredient/meal questions are implicitly in_scope (only cooking recipes are out)
 
 _SYSTEM_PROMPT = """You are a triage classifier for Poshan Saathi, a prenatal nutrition chatbot serving pregnant women in India.
 
@@ -84,14 +85,20 @@ emergency
 
 out_of_scope
   The user is asking about something unrelated to prenatal nutrition or antenatal care.
-  Examples: cryptocurrency, stock investing, politics, weather, recipes for specific dishes,
-  movie or song recommendations, travel destinations, religion, astrology, celebrity news.
+  Examples: cryptocurrency, stock investing, politics, weather, step-by-step cooking
+  recipes (how to prepare a dish), movie or song recommendations, travel destinations,
+  religion, astrology, celebrity news.
 
 in_scope
   The user is asking a legitimate question about prenatal nutrition, foods to eat or avoid
   during pregnancy, supplements, hydration, weight gain, antenatal care, or how their diet
   or medical conditions interact with pregnancy. This includes routine questions even when
   they mention chronic conditions like diabetes, hypertension, or anaemia.
+  IMPORTANT: every user is a pregnant woman talking to a prenatal nutrition companion, so
+  any question naming a food, ingredient, dish, beverage, or meal is implicitly asking
+  about eating it during pregnancy — "what about <some food>?", "is <some food> ok?",
+  "what should I eat for <some meal>?" are all in_scope. Whether/how a food fits a
+  pregnancy diet is in_scope; only step-by-step cooking instructions are out_of_scope.
 
 Tie-breaking rules:
   - Between in_scope and emergency: choose emergency only if the message describes
@@ -99,25 +106,68 @@ Tie-breaking rules:
   - Between in_scope and out_of_scope: prefer in_scope when the topic could plausibly
     relate to nutrition or pregnancy.
 
+Conversation continuity:
+  - The message may include a "Recent conversation:" block above the current
+    message. Short follow-ups inherit the topic of that conversation: after an
+    in-scope discussion of foods to eat, a follow-up like "what about <some
+    food>?" or "and in the third trimester?" continues the SAME in-scope topic
+    and must be classified in_scope.
+  - Classify the CURRENT message in that conversational context, never in isolation.
+  - Continuity does not override the other labels: a follow-up that switches to
+    an unrelated topic is still out_of_scope, and acute symptoms are still emergency.
+
 Return your label with one short sentence of reasoning."""
 
 
+# Classifier context caps: the last 2 turns, assistant turns clipped hard.
+# Triage only needs the topic gist ("we were discussing iron-rich foods"), not
+# the full answer text — keeping this tiny keeps the nano call fast and cheap.
+_CLASSIFIER_HISTORY_TURNS = 2
+_CLASSIFIER_TURN_CHARS = 300
+
+
+def _format_history(history: list[ChatTurn]) -> str:
+    """Compact 'Recent conversation:' block for the classifier user message."""
+    lines = []
+    for turn in history[-_CLASSIFIER_HISTORY_TURNS:]:
+        content = turn.content.strip()
+        if len(content) > _CLASSIFIER_TURN_CHARS:
+            content = content[:_CLASSIFIER_TURN_CHARS] + "…"
+        lines.append(f"{turn.role.upper()}: {content}")
+    return "\n".join(lines)
+
+
 @observe(name="classify_message")
-def classify_message(message: str) -> MessageClassification:
+def classify_message(
+    message: str, history: list[ChatTurn] | None = None
+) -> MessageClassification:
     """
-    Classify the message. On any failure, log and return `in_scope` —
-    the answer pipeline has its own scope and safety guards.
+    Classify the message, optionally in the context of the recent conversation
+    (so follow-ups like "what about <food>?" inherit the in-scope topic).
+    On any failure, log and return `in_scope` — the answer pipeline has its
+    own scope and safety guards.
     """
     # Set explicit input on the span instead of letting @observe capture
     # the function args (per Langfuse skill best practice).
-    update_current_span(input={"message": message, "prompt_version": PROMPT_VERSION})
+    update_current_span(input={
+        "message": message,
+        "n_history": len(history) if history else 0,
+        "prompt_version": PROMPT_VERSION,
+    })
+    if history:
+        user_content = (
+            "Recent conversation:\n" + _format_history(history)
+            + "\n\nCurrent message:\n" + message
+        )
+    else:
+        user_content = message
     try:
         completion = get_openai_client().beta.chat.completions.parse(
             model=settings.classifier_model,
             temperature=settings.classifier_temperature,
             messages=[
                 {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": message},
+                {"role": "user", "content": user_content},
             ],
             response_format=ClassificationResult,
         )

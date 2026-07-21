@@ -167,7 +167,9 @@ def _evaluate(case: TestCase, response, elapsed: float) -> CaseResult:
 def run_case(case: TestCase, suite: EvalSuite) -> CaseResult:
     """Execute one validated test case end-to-end."""
     profile = suite.profiles[case.profile]  # safe: validator guarantees existence
-    request = ChatRequest(message=case.query, user_profile=profile)
+    request = ChatRequest(
+        message=case.query, user_profile=profile, history=case.history
+    )
 
     t0 = time.perf_counter()
     try:

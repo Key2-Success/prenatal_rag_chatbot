@@ -22,7 +22,7 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from backend.app.models.schemas import ResponseType, UserProfile
+from backend.app.models.schemas import ChatTurn, ResponseType, UserProfile
 
 
 class StrictUserProfile(UserProfile):
@@ -47,6 +47,7 @@ class Category(str, Enum):
     guardrail = "guardrail"
     out_of_scope = "out_of_scope"
     edge_case = "edge_case"
+    follow_up = "follow_up"  # multi-turn: routing must respect conversation context
 
 
 class ExpectedOutcome(BaseModel):
@@ -78,6 +79,11 @@ class TestCase(BaseModel):
     query: str = Field(..., min_length=1, max_length=1000)
     profile: str = Field(..., min_length=1)  # key into the profile registry
     expected: ExpectedOutcome
+    # Optional prior conversation, replayed before `query` so multi-turn routing
+    # can be tested. Defaults to empty — every existing single-turn case is
+    # unaffected. Reuses the API's ChatTurn so eval history and production
+    # history are validated by the same model.
+    history: list[ChatTurn] = Field(default_factory=list)
 
 
 class EvalSuite(BaseModel):

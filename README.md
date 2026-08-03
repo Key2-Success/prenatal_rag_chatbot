@@ -1,49 +1,58 @@
-# Poshan Saathi — Prenatal Nutrition RAG Chatbot
+# Poshan Saathi — A Nutrition RAG Chatbot for Pregnant Indian Women
 
-Poshan Saathi ("nutrition companion" in Hindi) is a chatbot I built to answer pregnancy-nutrition questions for women in India. Anemia and undernutrition during pregnancy are strikingly common here, and most nutrition advice online is generic, unsourced, or written for a Western diet. I wanted the opposite: answers a user could actually trust. So the entire system is designed around one rule — it only ever says things that trace back to one of three authoritative sources (India's Ministry of Health, the FOGSI obstetrics federation, and the WHO) — and it tailors every answer to the person asking: their diet, their trimester, their medical conditions.
+**TL;DR**: Poshan Saathi ("nutrition companion" in Hindi) is a RAG chatbot I built to answer pregnancy-nutrition questions for women in India. 
 
-I built this as a portfolio piece for a **backend / senior AI-engineer** role, so this README is about the engineering underneath the chatbot — how retrieval works, how I keep the model from making things up, and how I measured whether any of it was actually good. There's no UI yet (a simple frontend is planned); the backend and the evaluation harness are the real substance, and they're what I document here.
+**The problem**: The Indian diaspora has specific dietary requirements (ovo-vegetarian and vegetarian are common) and medical conditions (anemia and diabetes are common), while most maternal nutrition advice is generic, unsourced, or written for a Western diet. 
 
-**From a one-day notebook to a production system.** This didn't start as anything serious. It began as a quick-and-dirty Jupyter notebook I threw together in a day — load a PDF, embed it, ask a question, get a plausible-looking answer. That was enough to prove the idea, but nowhere near trustworthy: I had no way to see what the system was doing, no way to measure whether an answer was actually any good, and nothing stopping it from confidently making things up. Turning that demo into what's here meant building all the parts a one-day prototype skips — observability and tracing, a real evaluation harness with metrics and persona-based test cases, deliberate chunking and re-ranking strategies, hybrid search, and hard guarantees that every answer stays faithful both to the user's profile and to what the sources actually say.
+**My solution**: I built a system designed specifically for the Indian pregnant woman, sourcing nutritional guidance directly from India's Ministry of Health, India's FOGSI obstetrics federation, and the WHO as a fallback, while tailoring every answer to the woman's diet, trimester, and medical conditions.
 
-### The stack
-
-
-| Layer              | Choice                                         |
-| ------------------ | ---------------------------------------------- |
-| API                | FastAPI                                        |
-| Vector search      | Pinecone — hybrid keyword + semantic           |
-| Embeddings         | OpenAI `text-embedding-3-small` (1536-dim)     |
-| Answer model       | OpenAI `gpt-4.1-mini`                          |
-| Message classifier | OpenAI `gpt-4.1-nano` (temperature 0)          |
-| Re-ranker          | Self-hosted `bge-reranker-v2-m3` cross-encoder |
-| Evaluation         | RAGAS with a cross-vendor Claude judge         |
-| Tracing            | Langfuse v4                                    |
+**Why this problem**: I was a quarterfinalist for The Gates Foundation’s AI Fellow Program (top 20/4500+ applicants, ie top 0.4%) where we were asked to build a prototype of an antenatal chatbot. I chose to bring my prototype to production using state-of-the-art RAG techniques to upskill my AI skillset and to bring a working solution to a real problem! Here’s a peek into how I approached this project. 🥰
 
 
----
-
-## Why this problem, and who it's for
-
-I deliberately narrowed the scope to something I could do *well* rather than something broad and shallow. I chose **not** to touch urgent situations or anything requiring a diagnosis: doing that responsibly demands a much more careful approach to minimizing harm than a project this size can honestly promise, so those messages get caught and redirected instead of answered. I also left out recommended visit schedules, because whether someone can actually keep an appointment depends on transportation, time off work, and money — factors a nutrition bot has no business pretending to solve. What's left — trusted, personalized, everyday nutrition guidance during pregnancy — felt both genuinely useful and realistically achievable.
-
-And it's built specifically for **Indian women**, not adapted from a Western default. That shows up in the personalization: the diets people here actually eat, the medical conditions that are common in Indian pregnancies, and even the units of measurement.
+## Technology Stack
 
 
-| Dimension         | What I designed for                                   |
-| ----------------- | ----------------------------------------------------- |
-| Diet              | Vegetarian, ovo-vegetarian, non-vegetarian            |
-| Common conditions | Low iron (anemia), hypertension, diabetes / GDM       |
-| Units             | Metric (kg, cm) — what Indian users actually think in |
+| Layer | Technologies |
+|---|---|
+| **Frontend** | Next.js, React, TypeScript, Tailwind CSS, Vercel |
+| **Backend** | FastAPI, Python, Upstash Redis, Docker, Render |
+| **AI / RAG** | OpenAI, Pinecone, BM25, LangChain, LlamaIndex |
+| **Observability & Eval** | Langfuse, RAGAS, Claude |
+| **Dev Tooling** | Claude Code, Git, GitHub |
 
 
-The design leans on the same instinct: keep it culturally familiar. The app is named in the local language — *Poshan Saathi*, "nutrition companion" — and the personas and framing use familiar, friendly names rather than clinical placeholders, so it feels like something built for the user rather than translated at them.
+## Does it work? Results at a glance
 
-## What guided my decisions
+I evaluated across 30 diverse test cases using RAGAS and a cross-vender judge (Claude) on these 3 core metrics to assess the system's performance. Here are the results averaged over 3 runs to take variance into account:
 
-The scope and design weren't guesses — they came from user research plus a few sources I trusted to keep me honest about using AI responsibly in a health and cultural context. I drew on the [Gates Foundation's AI development principles](https://www.gatesfoundation.org/ideas/articles/artificial-intelligence-ai-development-principles) and looked at the [maternal-health projects it has funded](https://www.gatesfoundation.org/about/committed-grants?q=maternal%20health#committed_grants) for how to apply AI in a culturally appropriate way. And to make sure I stayed within India's own expectations for health AI, I followed the [ICMR's Ethical Guidelines for AI in Healthcare (2023)](https://www.icmr.gov.in/icmrobject/custom_data/pdf/Ethical-guidelines/Ethical_Guidelines_AI_Healthcare_2023.pdf) as I made design and safety choices.
 
-## The knowledge base
+| Metric                | Score     | In plain English                                                                              |
+| --------------------- | --------- | --------------------------------------------------------------------------------------------- |
+| **Context precision** | **0.92** | How well did we rank and retrieve the relevant chunks, given the user's input?                |
+| **Faithfulness**      | **0.85** | How faithful is each claim? (ie how well is it *not* hallucinating?) |
+| **Answer relevancy**  | **0.93** | How relevant is our answer to the user's question?                                            |
+
+### Deconstructing the metrics
+The core of my approach was built around these 3 metrics, as I iteratively built my solution based on how these metrics were moving. Here's a quick motivation for why these 3 metrics cover the system performance end-to-end. <img width="1053" height="471" alt="Screenshot 2026-08-03 at 1 41 52 PM" src="https://github.com/user-attachments/assets/a3330373-020c-4d5e-9511-dcb5668a10a9" />
+<img width="1169" height="395" alt="Screenshot 2026-08-03 at 1 42 11 PM" src="https://github.com/user-attachments/assets/7a751038-2c7b-4ff0-82af-0799b99b49d1" />
+
+## Approaching the challenge
+**Co-creating with user research**: As someone who has not personally experienced pregnancy, I knew from the start that co-creating with real user input was essential. To understand the realities of pregnancy, I conducted a user interview with my mom. I learned that as an Indian vegetarian, she struggled to get nutritional guidance specific to her diet. Recognizing that the Indian diaspora has diverse dietary restrictions, I realized I could design this product to meet their specific needs.
+
+**Following AI frameworks & ethical guidelines**: I guided my vision, approach, and inspiration from [The Gates Foundation's AI guiding principles](https://www.gatesfoundation.org/ideas/articles/artificial-intelligence-ai-development-principles) and [the projects it has funded](https://www.gatesfoundation.org/about/committed-grants?q=maternal%20health#committed_grants). Since I was designing for Indian citizens, I ensured national AI governance rules were met by following [its ethical guidelines](https://www.icmr.gov.in/icmrobject/custom_data/pdf/Ethical-guidelines/Ethical_Guidelines_AI_Healthcare_2023.pdf).
+
+**Personalizing the user experience**: I used the 3 common diets in the Indian diaspora (fun fact: every food item in India has a 🟢/🟡/🔴 label to denote what animal product may be in the ingredients), common medical conditions, and the metric system to personalize the user experience to Indians. Even the name, Poshan Saathi (nutritional companion), is meant to evoke comfort in Hindi, a native language in India.
+
+
+| Dimension                 | What I designed for                                   |
+| ------------------------- | ----------------------------------------------------- |
+| Diet                      | 🟢 Vegetarian, 🟡 Ovo-Vegetarian, 🔴 Non-Vegetarian    |
+| Common medical conditions | Anemia (low iron), Hypertension, Diabetes             |
+| Units                     | Metric (kg, cm) — India uses the metric system        |
+
+
+
+## Choosing the data / the knowledge base
 
 Everything the bot can say traces back to a small, curated knowledge base of three trusted documents, each described in an annotated data dictionary. They all come from official sources but differ in scope, so — since this is a *local* prototype meant to fit *local* needs — I consult them in a deliberate order of authority: the Indian governing body first, then the Indian professional body, then the global one. That ordering is a first-class part of retrieval, not an afterthought.
 
@@ -54,22 +63,6 @@ Everything the bot can say traces back to a small, curated knowledge base of thr
 | 2        | **FOGSI** — Federation of Obstetric & Gynaecological Societies of India | India's professional obstetrics body; authoritative and local       |
 | 3        | **WHO** — World Health Organization                                     | Global and rigorous, but not India-specific — the fallback          |
 
-
-## Does it work? Results at a glance
-
-I score answer quality with RAGAS on three metrics. Here's the canonical run (averaged over multiple runs to smooth out noise):
-
-
-| Metric                | Score     | In plain English                                                                              |
-| --------------------- | --------- | --------------------------------------------------------------------------------------------- |
-| **Faithfulness**      | **0.853** | Does every claim in the answer actually come from a source? (i.e. is it *not* hallucinating?) |
-| **Answer relevancy**  | **0.933** | Does the answer actually address what was asked?                                              |
-| **Context precision** | **0.917** | Did we retrieve the *right* passages, ranked well?                                            |
-
-
-But honestly, the number isn't the interesting part. The interesting part is what I learned getting there: on a small evaluation set, the faithfulness score turned out to be **dominated by noise** — the same answer could score anywhere from 0.0 to 0.78 depending on the judge's mood that run. Realizing that changed how I worked. I stopped chasing prompt tweaks and started fixing the *structure* and *reducing the noise itself*. That story is in [What actually helped](#what-actually-helped-and-what-didnt) below.
-
-If you want the exhaustive version — every decision, every tuning run, every dead-end, cross-checked against the git history and 92 evaluation reports — it lives in `[docs/ARCHITECTURE_HISTORY.md](docs/ARCHITECTURE_HISTORY.md)`. This README is the guided tour.
 
 ---
 

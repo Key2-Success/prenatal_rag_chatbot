@@ -54,39 +54,60 @@ The core of my approach was built around these 3 metrics, as I iteratively built
 
 ## Choosing the data / the knowledge base
 
-Everything the bot can say traces back to a small, curated knowledge base of three trusted documents, each described in an annotated data dictionary. They all come from official sources but differ in scope, so — since this is a *local* prototype meant to fit *local* needs — I consult them in a deliberate order of authority: the Indian governing body first, then the Indian professional body, then the global one. That ordering is a first-class part of retrieval, not an afterthought.
+The point of this project was to upskill in AI/RAG to produce reliable answers from vetted, pertinent data sources instead of using a general LLM (ie ChatGPT), so I chose which data to include thoughtfully: 
 
+- **Prioritizing localization**: To keep answers locally relevant, I prioritized / ordered by regional governing body (India’s MoHFW), then regional professional organization (India’s FOGSI), and finally defaulted to global organization (WHO), 
 
-| Priority | Source                                                                  | Why it ranks here                                                   |
-| -------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| 1        | **MoHFW** — India's Ministry of Health & Family Welfare                 | The national governing body; most directly speaks to local guidance |
-| 2        | **FOGSI** — Federation of Obstetric & Gynaecological Societies of India | India's professional obstetrics body; authoritative and local       |
-| 3        | **WHO** — World Health Organization                                     | Global and rigorous, but not India-specific — the fallback          |
+- **Data freshness**: All sources were published in the last 5 years to ensure most up-to-date guidelines. 
+
+- **Scaling**: I created a knowledge_base_dictionary table to maintain the metadata of the data pulled to maintain data hygiene as the number of sources would grow. Perhaps we’d want to replace sources after a certain number of years, or balance how many sources from a specific origin, or weigh different sources differently, or A/B test different combinations of data sources, or keep track of different versions deployed over time, or leave remarks on the data sources. Any and more of these hypotheticals are obtainable from a simple data dictionary. :D
+
+| doc_id | file_name | file_type | doc_title | doc_language | org_geographic_scope | org_official_name | org_display_name | doc_source | doc_year_published | doc_num_pages | doc_reference_order | doc_description | doc_intended_use |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | anc_guidelines_india_mohfw | pdf | Training Manual on Care During Pregnancy and Child Birth | English | India | Ministry of Health and Family Welfare | MoHFW | [PDF](https://nhsrcindia.org/sites/default/files/2021-12/Care%20During%20Pregnancy%20and%20Childbirth%20Training%20Manual%20for%20CHO%20at%20AB-HWC.pdf) | 2021 | 80 | 1 | An Indian governing body's ANC guidelines | Primary source, given doc is both regional and governing |
+| 2 | anc_guidelines_india_fogsi | pdf | Routine Antenatal Care for the Healthy Pregnant Women | English | India | Federation of Obstetric and Gynaecological Societies of India | FOGSI | [PDF](https://www.fogsi.org/wp-content/uploads/2024/08/Binder_Routine-Antenatal-Care-for-the-Healthy-Pregnant-Women.pdf) | 2024 | 28 | 2 | An Indian professional organization's ANC guidelines | Secondary source, given doc is regional yet professional organization |
+| 3 | anc_guidelines_global_who | pdf | WHO antenatal care recommendations for a positive pregnancy experience | English | Global | World Health Organization | WHO | [PDF](https://iris.who.int/server/api/core/bitstreams/cb09dd39-1cfc-432c-9baf-feb6a5c40aa4/content) | 2021 | 40 | 3 | A global organization's ANC guidelines | Tertiary source, given doc is global organization |
 
 
 ---
 
-## How it works
+## Architecture diagram
 
-Here's the whole pipeline. Each box says **what the step is trying to do**, with the tool or technique it uses in parentheses underneath. Notice that emergencies and off-topic messages get caught *before* any search happens — a medical emergency should never sit waiting on the AI pipeline.
+This architecture was built iteratively. The main components include user input → message classification → chunk retrieval → answer generation. I've broken it down in more detail in this Mermaid diagram, including the parameters used.
 
 ```mermaid
 flowchart TD
-    U["User's question + their profile"] --> C{"Should we even answer this?<br/>(triage with gpt-4.1-nano)"}
-    C -->|"medical emergency"| E["Send the emergency response instantly<br/>(pre-written, no AI in the loop)"]
-    C -->|"off-topic"| O["Politely decline<br/>(pre-written response)"]
-    C -->|"a real nutrition question"| R["Cast a wide net for relevant passages<br/>(keyword + semantic search across all 3 sources)"]
-    R --> RR["Re-judge each passage against the question, precisely<br/>(bge cross-encoder re-ranker)"]
-    RR --> ORD["Prefer the most authoritative source<br/>(MoHFW → FOGSI → WHO, keep the top 3)"]
-    ORD --> A["Write a personalized answer<br/>(gpt-4.1-mini, given the user's profile)"]
-    A --> REV["Delete any claim a source doesn't back up<br/>(break answer into atomic claims, verify each)"]
-    REV --> V["Enforce diet & medical-safety rules<br/>(deterministic checks in code)"]
-    V --> RESP["Grounded, cited, personalized answer"]
+    U[/"Take user's question and append their user profile (diet, pregnancy week, medical conditions)"/] --> C
+
+    subgraph CLS["<b>Classification</b>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"]
+        C{"Re-route / classify user's question<br/>(LLM: gpt-4.1-nano, temperature: 0)"}
+        C -->|"medical emergency"| E[/"Redirect immediately to a health professional <br/><br/>(pre-written warning)"/]
+        C -->|"off-topic"| O[/"Politely decline, notifying scope of chatbot<br/><br/>(pre-written response)"/]
+        C -->|"answerable"| A["Continue answering question"]
+    end
+
+    subgraph RET["<b> Chunk Retrieval</b>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"]
+        R["Hybrid search across all sources, ie cast a quick, wide net<br/><br/>(reranker_candidate_k = 3 candidates from each source for 9 total chunks, hybrid search: dense/text-embedding-3-small/cosine similarity/α = 0.75 &amp; sparse/BM25 algorithm = 0.25, similarity_threshold = 0.05)"]
+        RR["Re-rank with a cross-encoder, ie fine-tuning for better precision<br/><br/>(top_k = 3 final chunks, using bge-reranker, profile-aware query appended, max_token_length = 8192)"]
+        ORD["Re-rank by source priority<br/><br/>(MoHFW → FOGSI → WHO)"]
+        R --> RR --> ORD
+    end
+
+    subgraph GEN["<b>Answer Generation</b>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"]
+        P["Generate a personalized, grounded, polite answer based on user's profile<br/><br/>(LLM = gpt-4.1-mini)"]
+        REV["Remove any ungrounded claim, ie break each answer into atomic claims and verify each<br/><br/>(LLM = gpt-4.1-mini)"]
+        V["Enforce user's diet and medical conditions are followed, ie confirm no meat for vegetarian, no high sodium diet for hypertension, etc<br/><br/>(LLM = gpt-4.1-mini)"]
+        RESP[/"Share final grounded, cited, personalized answer to user"/]
+        P --> REV --> V --> RESP
+    end
+
+    A --> R
+    ORD --> P
+
+    style CLS fill:#fff3cd,stroke:#d4a017,stroke-width:2px
+    style RET fill:#d6eaf8,stroke:#2471a3,stroke-width:2px
+    style GEN fill:#d5f5e3,stroke:#229954,stroke-width:2px
 ```
-
-
-
-**Why is there a separate re-ranking step?** This is the part I'm most glad I dug into, so it's worth explaining. The first search is fast but a little blunt: it scores each passage against the question on its own, using vectors computed ahead of time. That's perfect for casting a wide net, but its sense of "relevant" is coarse. A cross-encoder re-ranker is the opposite — it reads the question and a passage *together*, in one pass, so it can tell "actually answers this" from "vaguely related" far more accurately. The catch is it's slow, so you can't run it over the whole corpus. The trick is to use both: let the cheap search shortlist ~15 candidates, then let the accurate-but-slow re-ranker pick the best 3. Recall first, precision second. When I first saw the re-ranker giving everything scores like 0.01, I assumed the re-ranker was broken — but digging into the actual passages showed the real problem was upstream in how I was *chunking* the documents. That kind of "follow it to the real cause" moment happened a lot on this project.
 
 ---
 

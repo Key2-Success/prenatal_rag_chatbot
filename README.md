@@ -21,14 +21,14 @@
 | **Dev Tooling** | Claude Code, Git, GitHub |
 
 
-## Does it work? Results at a glance
+## Results at a glance
 
 I evaluated across 30 diverse test cases using RAGAS and a cross-vender judge (Claude) on these 3 core metrics to assess the system's performance. Here are the results averaged over 3 runs to take variance into account:
 
 
 | Metric                | Score     | In plain English                                                                              |
 | --------------------- | --------- | --------------------------------------------------------------------------------------------- |
-| **Context precision** | **0.92** | How well did we rank and retrieve the relevant chunks, given the user's input?                |
+| **Context precision** | **0.92** | How well did we rank and retrieve the relevant chunks given the user's input?                |
 | **Faithfulness**      | **0.85** | How faithful is each claim? (ie how well is it *not* hallucinating?) |
 | **Answer relevancy**  | **0.93** | How relevant is our answer to the user's question?                                            |
 
@@ -56,7 +56,7 @@ The core of my approach was built around these 3 metrics, as I iteratively built
 
 The point of this project was to upskill in AI/RAG to produce reliable answers from vetted, pertinent data sources instead of using a general LLM (ie ChatGPT), so I chose which data to include thoughtfully: 
 
-- **Prioritizing localization**: To keep answers locally relevant, I prioritized / ordered by regional governing body (India’s MoHFW), then regional professional organization (India’s FOGSI), and finally defaulted to global organization (WHO), 
+- **Prioritizing localization**: To keep answers locally relevant, I prioritized / ordered by: regional governing body (India’s MoHFW), then regional professional organization (India’s FOGSI), and finally defaulted to global organization (WHO). 
 
 - **Data freshness**: All sources were published in the last 5 years to ensure most up-to-date guidelines. 
 

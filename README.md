@@ -193,16 +193,16 @@ I protected my wallet against bad actors post deployment by adding rate limiting
 | Layer | Limit | What it protects against |
 |---|---|---|
 | **Per-IP rate limit** | 10/min, 50/day | One person hammering the endpoint |
-| **Global daily budget** | 500/day → 503 | A botnet spread across many IPs (~$1/day worst case) |
+| **Global daily budget** | 500/day | A botnet spread across many IPs (~$1/day worst case) |
 | **Input caps** | 500-char message | Token-bomb prompts |
-| **OpenAI hard usage cap** | set in dashboard | Everything else — the only truly tamper-proof ceiling |
+| **OpenAI hard usage cap** | set in dashboard | Everything else |
 
 
-- **Warming up cold starts**: Free-tier Render sleeps after 15 minutes and takes ~60 seconds to wake. So the server now warms itself at boot (Pinecone client, BM25 encoder, OpenAI connection) instead of making the first user pay for it, taking the first request from ~13s to the usual ~5-8s. And the landing page pings `/health` the moment someone arrives, so the wake-up overlaps the time they spend reading and filling out the form. I chose that over a cron job pinging every 5 minutes, which would keep the server awake 24/7 and burn the 750 free instance-hours on visitors who never showed up.
+- **Warming up cold starts**: Free-tier Render sleeps after 15 minutes and takes ~60 seconds to wake, so I got around this by having the landing page ping `/health` as soon as someone arrives so that by the time they've filled out the form, it's up. And even on a server that was already awake, the first question was paying to spin up Pinecone, BM25, and the OpenAI connection, so I moved all that to boot instead, taking down the first request from ~13s to ~5-8s.
 
-- **Chatbots are a conversation, not a self-contained question**: All of my eval cases were single, self-contained questions, so I'd  built my system around one-off Q&A. Then I used the live app, asked about iron-rich foods, followed up with "nice what about ghee," and got told ghee was out of scope. The classifier wasn't wrong given what it saw: every request was stateless, so it had five words and no idea we'd been talking about food. Now the browser replays the recent conversation with each request (the server stays stateless — Render's container sleeps anyway, and no health-app conversation data sits on my server), and I added multi-turn eval cases so it can't silently regress.
+- **Chatbots are a conversation, not a self-contained question**: All of my eval cases were single, self-contained questions, so I'd  built my system around one-off Q&A. Then when I used the live app and asked about iron-rich foods, followed up with "nice what about ghee," I got told ghee was out of scope, since each request was stateless so it had just five words in memory and no idea we'd been talking about food. Now the browser replays the recent conversation with each request, and I also added multi-turn eval cases to prevent silent regression in the test suite.
 
-- **Observability**: Outside of tracking the Langfuse requests, I also tracked anonymous and coarse audience analytics: a random UUID from `localStorage`, device, language, and country, with deliberately no IP and no precise location, since it's a health app that requires confidentiality by governance.
+- **Observability**: Outside of tracking the Langfuse requests, I also tracked anonymous and coarse audience analytics: a UUID from `localStorage`, device, language, and country, with deliberately no IP and no precise location, since it's a health app that requires confidentiality by local governance.
 
 
 ---

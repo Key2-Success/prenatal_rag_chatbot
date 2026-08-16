@@ -17,14 +17,14 @@ const dietMeta: Record<DietType, { dot: string; short: string }> = {
 
 function Label({ children }: { children: React.ReactNode }) {
   return (
-    <span className="mb-1.5 block text-xs font-semibold uppercase tracking-wide text-sand-500">
+    <span className="mb-1 block text-xs font-semibold uppercase tracking-wide text-sand-500">
       {children}
     </span>
   );
 }
 
 const fieldClass =
-  "focus-rose w-full rounded-xl border border-sand-200 bg-sand-50 px-3.5 py-2.5 text-sand-800 placeholder:text-sand-400 transition-colors";
+  "focus-rose w-full rounded-xl border border-sand-200 bg-sand-50 px-3.5 py-2 text-sand-800 placeholder:text-sand-400 transition-colors";
 
 export function TextField({
   label,
@@ -111,7 +111,7 @@ export function WeekSlider({
 
   return (
     <div className="block">
-      <div className="mb-1.5 flex items-baseline justify-between">
+      <div className="mb-1 flex items-baseline justify-between">
         <Label>Week of pregnancy</Label>
         <span className="text-sm font-medium text-rose-600">
           Week {value} · <span className="text-sand-500">{trimester}</span>

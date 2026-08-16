@@ -21,7 +21,7 @@ import { MotherAppleMark } from "@/components/Wordmark";
 import { warmUpBackend } from "@/lib/api";
 
 const GITHUB_README =
-  "https://github.com/Key2-Success/prenatal_rag_chatbot/blob/main/README.md";
+  "https://github.com/Key2-Success/prenatal_rag_chatbot#readme";
 const DEMO_VIDEO =
   "https://drive.google.com/file/d/1TLB4YFKsw1b1tXJGa2Z5Yz9gbQVlRjzJ/view";
 
@@ -39,16 +39,20 @@ const TECHNOLOGIES = [
 function Card({
   title,
   children,
+  delay = 0,
 }: {
   title: string;
   children: React.ReactNode;
+  delay?: number;
 }) {
   return (
-    <section className="rounded-2xl border border-sand-200/70 bg-white/60 p-4 shadow-[0_1px_2px_rgba(36,31,27,0.04)] transition-shadow hover:shadow-[0_2px_10px_rgba(36,31,27,0.06)]">
+    <section
+      style={{ animationDelay: `${delay}ms` }}
+      className="animate-rise rounded-2xl border border-sand-200/70 bg-white/60 p-3 shadow-[0_1px_2px_rgba(36,31,27,0.04)] transition-[transform,border-color,box-shadow] duration-200 hover:-translate-y-0.5 hover:border-sand-300 hover:shadow-[0_6px_16px_rgba(36,31,27,0.08)]">
       <h2 className="text-[0.7rem] font-bold uppercase tracking-[0.14em] text-rose-600">
         {title}
       </h2>
-      <p className="mt-2 text-[0.9rem] leading-[1.65] text-sand-700">
+      <p className="mt-1.5 text-[0.9rem] leading-[1.55] text-sand-700">
         {children}
       </p>
     </section>
@@ -62,10 +66,10 @@ export default function Landing() {
   }, []);
 
   return (
-    <main className="mx-auto max-w-4xl px-6 py-4 sm:py-5">
+    <main className="mx-auto flex min-h-screen max-w-4xl flex-col justify-center px-6 py-3">
       {/* Custom lockup (rather than <Wordmark/>) so the mark scales to the full
           height of BOTH text lines and the welcome line aligns with the name. */}
-      <div className="flex justify-center">
+      <div className="animate-rise flex justify-center">
         <div className="flex items-center gap-3">
           <div
             className="grid h-[3.4rem] w-[3.4rem] shrink-0 place-items-center rounded-2xl bg-rose-600 text-sand-50 shadow-sm"
@@ -90,60 +94,69 @@ export default function Landing() {
       </div>
 
       {/* Stack as pills — scans as metadata instead of a paragraph of commas. */}
-      <div className="mx-auto mt-4 flex max-w-4xl flex-wrap items-center justify-center gap-1.5">
+      <div style={{ animationDelay: "80ms" }} className="animate-rise mx-auto mt-5 flex max-w-4xl flex-wrap items-center justify-center gap-1.5">
         <span className="mr-1 text-[0.68rem] font-semibold uppercase tracking-[0.16em] text-sand-500">
           Technology Stack
         </span>
         {TECHNOLOGIES.map((tech) => (
           <span
             key={tech}
-            className="rounded-full border border-sand-200/80 bg-white/70 px-2.5 py-[3px] text-[0.78rem] font-medium text-sand-700"
+            className="rounded-full border border-sand-200/80 bg-white/70 px-2.5 py-[3px] text-[0.78rem] font-medium text-sand-700 transition-colors hover:border-rose-300 hover:bg-rose-50 hover:text-rose-700"
           >
             {tech}
           </span>
         ))}
       </div>
 
-      <div className="mt-4 flex flex-col gap-2.5 sm:flex-row">
+      <div style={{ animationDelay: "160ms" }} className="animate-rise mt-7 flex flex-col gap-2.5 sm:flex-row">
         <a
           href="/chat"
-          className="focus-rose rounded-xl bg-rose-600 px-6 py-3 text-center text-[0.9rem] font-semibold tracking-wide text-white shadow-sm transition-all hover:bg-rose-700 hover:shadow-md sm:flex-1"
+          className="focus-rose group rounded-xl bg-rose-600 px-6 py-2.5 text-center text-[0.9rem] font-semibold tracking-wide text-white shadow-sm transition-[background-color,box-shadow] duration-200 hover:bg-rose-700 hover:shadow-md sm:flex-1"
         >
-          Try it yourself here →
+          Try it yourself here{" "}
+          <span className="inline-block transition-transform duration-200 group-hover:translate-x-1">
+            →
+          </span>
         </a>
         <a
           href={GITHUB_README}
           target="_blank"
           rel="noopener noreferrer"
-          className="focus-rose rounded-xl border border-rose-300 bg-white px-6 py-3 text-center text-[0.9rem] font-semibold tracking-wide text-rose-700 transition-colors hover:border-rose-400 hover:bg-rose-50 sm:flex-1"
+          className="focus-rose group rounded-xl border border-rose-300 bg-white px-6 py-2.5 text-center text-[0.9rem] font-semibold tracking-wide text-rose-700 transition-colors hover:border-rose-400 hover:bg-rose-50 sm:flex-1"
         >
-          How I built it ↗
+          How I built it{" "}
+          <span className="inline-block transition-transform duration-200 group-hover:-translate-y-0.5 group-hover:translate-x-0.5">
+            ↗
+          </span>
         </a>
         <a
           href={DEMO_VIDEO}
           target="_blank"
           rel="noopener noreferrer"
-          className="focus-rose rounded-xl border border-rose-300 bg-white px-6 py-3 text-center text-[0.9rem] font-semibold tracking-wide text-rose-700 transition-colors hover:border-rose-400 hover:bg-rose-50 sm:flex-1"
+          className="focus-rose group rounded-xl border border-rose-300 bg-white px-6 py-2.5 text-center text-[0.9rem] font-semibold tracking-wide text-rose-700 transition-colors hover:border-rose-400 hover:bg-rose-50 sm:flex-1"
         >
-          Chatbot demo ↗
+          Chatbot demo{" "}
+          <span className="inline-block transition-transform duration-200 group-hover:-translate-y-0.5 group-hover:translate-x-0.5">
+            ↗
+          </span>
         </a>
       </div>
 
-      <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <Card title="TL;DR">
+      <div className="mt-2 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+        <Card title="TL;DR" delay={240}>
           <strong className="font-semibold text-sand-700">Poshan Saathi</strong>{" "}
           ("nutrition companion" in Hindi) is a RAG chatbot I built to answer
           pregnancy-nutrition questions for women in India.
         </Card>
 
-        <Card title="The problem">
+        <Card title="The problem" delay={240}>
           The Indian diaspora has specific dietary requirements (ovo-vegetarian
           and vegetarian are common) and medical conditions (anemia and diabetes
           are common), while most maternal nutrition advice is generic,
           unsourced, or written for a Western diet.
         </Card>
 
-        <Card title="My solution">
+        <Card title="My solution" delay={380}>
           I built a system specifically for the Indian pregnant woman, sourcing
           nutritional guidance directly from India's Ministry of Health, India's
           FOGSI obstetrics federation, and the WHO as a fallback, while
@@ -151,7 +164,7 @@ export default function Landing() {
           conditions.
         </Card>
 
-        <Card title="Why this problem">
+        <Card title="Why this problem" delay={380}>
           I was a quarterfinalist for The Gates Foundation's AI Fellow Program
           (top 20/4500+ applicants, ie top 0.4%) where we built a prototype of
           an antenatal chatbot. I chose to bring my prototype to production
@@ -160,7 +173,7 @@ export default function Landing() {
         </Card>
       </div>
 
-      <p className="mt-3 text-center text-[0.72rem] tracking-wide text-sand-500">
+      <p style={{ animationDelay: "500ms" }} className="animate-rise mt-1 text-center text-[0.72rem] tracking-wide text-sand-500">
         Educational portfolio project — not medical advice. Always consult your
         doctor or midwife.
       </p>

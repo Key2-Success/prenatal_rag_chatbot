@@ -40,16 +40,16 @@ export default function ChatPage() {
   // --- Onboarding ---
   if (!profile) {
     return (
-      <main className="mx-auto flex min-h-screen max-w-xl flex-col justify-center px-5 py-10">
-        <div className="mb-6 flex flex-col items-center text-center">
+      <main className="mx-auto flex min-h-screen max-w-xl flex-col justify-center px-5 py-3">
+        <div className="mb-3 flex flex-col items-center text-center">
           <Wordmark />
-          <p className="mt-5 max-w-sm text-sand-600">
-            A gentle, evidence-based nutrition companion for your pregnancy —
-            grounded in guidance from India's health authorities. Tell me a
-            little about you to begin.
+          <p className="mt-2 max-w-sm text-sand-600">
+            An evidence-based nutrition companion for your pregnancy grounded in
+            guidance from India's health authorities. Tell me a little about you
+            to begin.
           </p>
         </div>
-        <div className="rounded-3xl border border-sand-200 bg-sand-50/80 p-6 shadow-sm sm:p-7">
+        <div className="rounded-3xl border border-sand-200 bg-sand-50/80 p-4 shadow-sm sm:p-5">
           <ProfileForm
             submitLabel="Start chatting"
             onSubmit={(p) => setProfile(p)}

@@ -90,8 +90,8 @@ export function ProfileForm({
   };
 
   return (
-    <div className="space-y-5">
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+    <div className="space-y-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <TextField
           label="Name"
           value={draft.name}
@@ -118,7 +118,7 @@ export function ProfileForm({
         onChange={(v) => set("diet_type", v)}
       />
 
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-2 gap-3">
         <NumberField
           label="Weight"
           value={draft.weight_kg}
@@ -150,7 +150,7 @@ export function ProfileForm({
         </p>
       )}
 
-      <div className="flex gap-3 pt-1">
+      <div className="flex gap-3">
         {onCancel && (
           <button
             type="button"

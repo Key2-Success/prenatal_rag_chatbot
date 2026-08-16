@@ -70,3 +70,18 @@ body {
   box-shadow: 0 1px 4px rgba(157, 67, 96, 0.28);
   cursor: pointer;
 }
+
+/* Accessibility: honour the OS "reduce motion" setting. The landing page's
+   staggered entrance and hover transitions are decorative, so anyone with
+   motion sensitivity gets the static layout instead. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

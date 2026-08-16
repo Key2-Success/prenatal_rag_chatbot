@@ -240,10 +240,12 @@ export function Chat({ profile }: { profile: UserProfile }) {
       {/* Thread */}
       <div ref={scrollRef} className="flex-1 space-y-4 overflow-y-auto px-1 py-4">
         {messages.length === 0 && (
-          <div className="mx-auto mt-10 max-w-sm text-center">
+          <div className="mx-auto mt-10 max-w-lg text-center">
             <p className="text-sand-500">
               Hi {profile.name.split(" ")[0]} — ask me anything about your
-              nutrition during pregnancy. Try{" "}
+              nutrition during pregnancy.
+              <br />
+              Try{" "}
               <button
                 className="font-medium text-rose-600 underline decoration-rose-200 underline-offset-2 hover:decoration-rose-400"
                 onClick={() => setInput("How much iron should I be eating?")}

@@ -68,6 +68,10 @@ const config: Config = {
           "0%": { opacity: "0", transform: "translateY(6px)" },
           "100%": { opacity: "1", transform: "translateY(0)" },
         },
+        "rise": {
+          "0%": { opacity: "0", transform: "translateY(8px)" },
+          "100%": { opacity: "1", transform: "translateY(0)" },
+        },
         "blink": {
           "0%, 80%, 100%": { opacity: "0.25" },
           "40%": { opacity: "1" },
@@ -75,6 +79,7 @@ const config: Config = {
       },
       animation: {
         "fade-up": "fade-up 0.35s ease-out both",
+        "rise": "rise 0.9s cubic-bezier(0.25, 0.8, 0.35, 1) both",
         "blink": "blink 1.4s infinite both",
       },
     },

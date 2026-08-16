@@ -8,6 +8,8 @@
 
 **Why this problem**: I was a quarterfinalist for The Gates Foundation’s AI Fellow Program (top 20/4500+ applicants, ie top 0.4%) where we were asked to build a prototype of an antenatal chatbot. I chose to bring my prototype to production using state-of-the-art RAG techniques to upskill my AI skillset and to bring a working solution to a real problem! Here’s a peek into how I approached this project. 🥰
 
+#### [Click here](https://github.com/user-attachments/files/31110413/Prenatal.chatbot.demo.pdf) for a quick demo of the prenatal chatbot or interact with it live at [the deployed website here](https://prenatal-rag-chatbot.vercel.app/).
+
 ---
 
 **Table of Contents:**

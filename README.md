@@ -24,6 +24,7 @@ A preview of what's in this README so you can pick and choose sections of intere
 6. [My philosophy behind the decisions I made](#6-my-philosophy-behind-the-decisions-i-made)
 7. [How the pipeline evolved](#7-how-the-pipeline-evolved)
 8. [Where things live](#8-where-things-live)
+9. [Deploying to production](#9-deploying-to-production)
 
 ---
 
@@ -191,4 +192,47 @@ flowchart LR
 | `scripts/`                     | One-time ingestion plus retrieval-debugging tools                                    |
 | `docs/ARCHITECTURE_HISTORY.md` | The exhaustive engineering archive                                                   |
 
+---
 
+## 9. Deploying to production
+
+Getting this live was its own engineering problem, and the constraint that shaped everything was a 600MB model.
+
+### The split, and why
+
+Frontend on **Vercel**, backend on **Render**. I'd have preferred everything on Vercel, but my backend self-hosts a cross-encoder reranker (568M parameters) — serverless functions are size-capped, CPU-only, and cold-start every invocation, so it simply doesn't fit. A long-running container it is.
+
+### Fitting a 600MB model on a free tier
+
+The trick was to not ship the model at all. The reranker is backend-switchable with one environment variable: self-hosted on my Mac's GPU for development, Pinecone's hosted copy of the *same* model in production. Identical weights, so retrieval behaves the same — I confirmed it by re-running the full routing eval against the hosted backend (30/30, ordering unchanged). Production now needs no torch, no model download, and no 2GB of RAM, which got the image down to **12 runtime dependencies instead of 23**. Getting there meant decoupling my `Chunk` model out of `chunker.py`, which had been silently dragging LlamaParse, LangChain, and tiktoken into the runtime path — ingestion is a one-time local job, so none of it belongs in the deployed image.
+
+### Keeping a public LLM endpoint from eating my wallet
+
+My API keys are server-side, so the only route to them is through `/chat` — every guardrail on that endpoint is also a guardrail on my bill.
+
+| Layer | Limit | What it protects against |
+|---|---|---|
+| **Per-IP rate limit** | 10/min, 50/day | One person hammering the endpoint |
+| **Global daily budget** | 500/day → 503 | A botnet spread across many IPs (~$1/day worst case) |
+| **Input caps** | 500-char messages, 16KB bodies | Token-bomb prompts |
+| **OpenAI hard usage cap** | set in their dashboard | Everything else — the only truly tamper-proof ceiling |
+
+That last row matters, because my app-level limits are a first layer, not a guarantee: Render's free tier sleeps after 15 minutes idle and an in-memory counter resets on every wake, so someone could farm restarts to blow past the daily cap. That's why the global budget counts in **Upstash Redis** — free, serverless, and REST-based so there's no persistent connection to babysit.
+
+### Cold starts, and hiding them
+
+Free-tier Render sleeps after 15 minutes and takes ~60 seconds to wake. So the server now warms itself at boot (Pinecone client, BM25 encoder, OpenAI connection) instead of making the first user pay for it — that alone took the first request from ~13s to the usual ~5-8s. And the landing page pings `/health` the moment someone arrives, so the wake-up overlaps the time they spend reading and filling out the form. I chose that over a cron job pinging every 5 minutes, which would keep the server awake 24/7 and burn the 750 free instance-hours on visitors who never showed up.
+
+### What production taught me: it's a conversation, not a search box
+
+All 30 of my eval cases were single, self-contained questions — so I'd quietly built the whole pipeline around one-off Q&A. Then I used the live app, asked about iron-rich foods, followed up with "nice what about ghee," and got told ghee was out of scope. 🙃 The classifier wasn't wrong given what it saw: every request was stateless, so it had five words and no idea we'd been talking about food. Now the browser replays the recent conversation with each request (the server stays stateless — Render's container sleeps anyway, and no health-app conversation data sits on my server), and I added multi-turn eval cases so it can't silently regress.
+
+The real lesson: my evals were measuring the thing I'd designed, not the thing people actually do.
+
+### Watching it in the wild
+
+Langfuse runs in production too, so every real conversation is traced end-to-end and tagged with the response type and profile attributes — handy for questions like "show me every emergency redirect this week." Audience analytics stay anonymous and coarse: a random UUID from `localStorage`, device, language, and country, with deliberately **no IP and no precise location**. It's a health app; country-level is plenty.
+
+### Config and secrets
+
+Everything environment-driven, nothing committed. Required keys have no defaults, so a misconfigured deploy fails loudly at startup rather than 500-ing on the first user.

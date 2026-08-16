@@ -7,7 +7,7 @@
  * side profile (head on the right, maternal care) whose round belly is an
  * apple (nutrition), complete with a little stem and leaf at the top.
  */
-function MotherAppleMark({ className }: { className?: string }) {
+export function MotherAppleMark({ className }: { className?: string }) {
   return (
     <svg
       viewBox="0 0 48 48"
@@ -52,18 +52,18 @@ export function Wordmark({ compact = false }: { compact?: boolean }) {
       >
         <MotherAppleMark className={compact ? "h-6 w-6" : "h-9 w-9"} />
       </div>
-      <div className="leading-tight">
-        <div
-          className={`font-serif font-semibold tracking-tight text-sand-800 ${
+      <div className="flex items-baseline gap-2 leading-tight">
+        <span
+          className={`font-sans font-bold tracking-tight text-sand-800 ${
             compact ? "text-base" : "text-xl"
           }`}
         >
           Poshan Saathi
-        </div>
+        </span>
         {!compact && (
-          <div className="text-sm text-sand-500">
-            पोषण साथी · nutrition companion
-          </div>
+          <span className="text-sm text-sand-600">
+            <span className="text-sand-300">|</span> nutrition companion
+          </span>
         )}
       </div>
     </div>

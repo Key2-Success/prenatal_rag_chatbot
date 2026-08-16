@@ -5,8 +5,10 @@
  * solves, and how it was built, then routes visitors into the app at /chat.
  * Written for recruiters and hiring managers arriving cold from a link.
  *
- * Laid out as a 2x2 card grid so the three CTAs stay visible without
- * scrolling on a typical laptop viewport.
+ * Type: all-sans (Nunito) with small uppercase tracked labels for the card
+ * headings — the serif is reserved for the wordmark so the page reads as
+ * editorial rather than clunky. Laid out as a 2x2 card grid so the three CTAs
+ * stay visible without scrolling on a typical laptop viewport.
  *
  * It also pings the backend on mount — Render's free tier sleeps after ~15 min
  * idle, so waking it while someone reads this page means the app is warm by the
@@ -15,7 +17,7 @@
 "use client";
 
 import { useEffect } from "react";
-import { Wordmark } from "@/components/Wordmark";
+import { MotherAppleMark } from "@/components/Wordmark";
 import { warmUpBackend } from "@/lib/api";
 
 const GITHUB_README =
@@ -23,19 +25,16 @@ const GITHUB_README =
 const DEMO_VIDEO =
   "https://drive.google.com/file/d/1TLB4YFKsw1b1tXJGa2Z5Yz9gbQVlRjzJ/view";
 
-// Flattened from the README stack table — frontend, backend, AI/RAG,
-// observability/eval, then dev tooling.
-// Split across two explicit lines so the break lands where we want it
-// (after Upstash Redis) rather than wherever the text happens to wrap.
-const TECH_LINE_1 = [
+// Rendered as pills rather than a comma-separated sentence: 21 items reads as
+// a wall of prose, but as chips it scans like metadata and stays out of the
+// way of the copy.
+const TECHNOLOGIES = [
   "Python", "FastAPI", "LangChain", "LlamaIndex", "Langfuse",
   "Pinecone", "BM25", "RAGAS", "OpenAI", "Claude", "Upstash Redis",
-].join(", ");
-const TECH_LINE_2 = [
   "Docker", "Render",
   "Next.js", "React", "TypeScript", "Tailwind CSS", "Vercel",
-  "Claude Code", "Git", "GitHub",
-].join(", ");
+  "Claude Code", "Git",
+];
 
 function Card({
   title,
@@ -45,11 +44,13 @@ function Card({
   children: React.ReactNode;
 }) {
   return (
-    <section className="rounded-2xl border border-sand-200 bg-sand-50/80 p-4 shadow-sm">
-      <h2 className="font-serif text-base font-semibold text-sand-800">
+    <section className="rounded-2xl border border-sand-200/70 bg-white/60 p-4 shadow-[0_1px_2px_rgba(36,31,27,0.04)] transition-shadow hover:shadow-[0_2px_10px_rgba(36,31,27,0.06)]">
+      <h2 className="text-[0.7rem] font-bold uppercase tracking-[0.14em] text-rose-600">
         {title}
       </h2>
-      <p className="mt-1.5 text-sm leading-relaxed text-sand-700">{children}</p>
+      <p className="mt-2 text-[0.9rem] leading-[1.65] text-sand-700">
+        {children}
+      </p>
     </section>
   );
 }
@@ -61,29 +62,52 @@ export default function Landing() {
   }, []);
 
   return (
-    <main className="mx-auto max-w-6xl px-6 py-5 sm:py-6">
-      <div className="flex flex-col items-center text-center">
-        <Wordmark />
-        <p className="mt-3 text-sand-600">Welcome to my AI RAG project! 👋</p>
+    <main className="mx-auto max-w-4xl px-6 py-4 sm:py-5">
+      {/* Custom lockup (rather than <Wordmark/>) so the mark scales to the full
+          height of BOTH text lines and the welcome line aligns with the name. */}
+      <div className="flex justify-center">
+        <div className="flex items-center gap-3">
+          <div
+            className="grid h-[3.4rem] w-[3.4rem] shrink-0 place-items-center rounded-2xl bg-rose-600 text-sand-50 shadow-sm"
+            aria-hidden
+          >
+            <MotherAppleMark className="h-11 w-11" />
+          </div>
+          <div className="leading-tight">
+            <div className="flex items-baseline gap-2">
+              <span className="font-sans text-xl font-bold tracking-tight text-sand-800">
+                Poshan Saathi
+              </span>
+              <span className="text-sm text-sand-600">
+                <span className="text-sand-300">|</span> nutrition companion
+              </span>
+            </div>
+            <p className="mt-1 text-[0.95rem] tracking-wide text-sand-600">
+              Welcome to my AI RAG project 👋
+            </p>
+          </div>
+        </div>
       </div>
 
-      {/* Flex row gives a hanging indent: wrapped lines align under the start
-          of the list rather than under the "Technology Stack:" label. */}
-      <p className="mt-3 flex gap-2 text-base leading-relaxed text-sand-600">
-        <span className="whitespace-nowrap font-semibold text-sand-700">
-          Technology Stack:
+      {/* Stack as pills — scans as metadata instead of a paragraph of commas. */}
+      <div className="mx-auto mt-4 flex max-w-4xl flex-wrap items-center justify-center gap-1.5">
+        <span className="mr-1 text-[0.68rem] font-semibold uppercase tracking-[0.16em] text-sand-500">
+          Technology Stack
         </span>
-        <span>
-          {TECH_LINE_1},
-          <br />
-          {TECH_LINE_2}
-        </span>
-      </p>
+        {TECHNOLOGIES.map((tech) => (
+          <span
+            key={tech}
+            className="rounded-full border border-sand-200/80 bg-white/70 px-2.5 py-[3px] text-[0.78rem] font-medium text-sand-700"
+          >
+            {tech}
+          </span>
+        ))}
+      </div>
 
-      <div className="mt-4 flex flex-col gap-3 sm:flex-row">
+      <div className="mt-4 flex flex-col gap-2.5 sm:flex-row">
         <a
           href="/chat"
-          className="focus-rose rounded-2xl bg-rose-600 px-6 py-3 text-center font-semibold text-white shadow-sm transition-colors hover:bg-rose-700 sm:flex-[2]"
+          className="focus-rose rounded-xl bg-rose-600 px-6 py-3 text-center text-[0.9rem] font-semibold tracking-wide text-white shadow-sm transition-all hover:bg-rose-700 hover:shadow-md sm:flex-1"
         >
           Try it yourself here →
         </a>
@@ -91,23 +115,23 @@ export default function Landing() {
           href={GITHUB_README}
           target="_blank"
           rel="noopener noreferrer"
-          className="focus-rose rounded-2xl border border-sand-200 bg-sand-50 px-6 py-3 text-center font-medium text-sand-700 shadow-sm transition-colors hover:bg-sand-100 sm:flex-1"
+          className="focus-rose rounded-xl border border-rose-300 bg-white px-6 py-3 text-center text-[0.9rem] font-semibold tracking-wide text-rose-700 transition-colors hover:border-rose-400 hover:bg-rose-50 sm:flex-1"
         >
-          How I built it
+          How I built it ↗
         </a>
         <a
           href={DEMO_VIDEO}
           target="_blank"
           rel="noopener noreferrer"
-          className="focus-rose rounded-2xl border border-sand-200 bg-sand-50 px-6 py-3 text-center font-medium text-sand-700 shadow-sm transition-colors hover:bg-sand-100 sm:flex-1"
+          className="focus-rose rounded-xl border border-rose-300 bg-white px-6 py-3 text-center text-[0.9rem] font-semibold tracking-wide text-rose-700 transition-colors hover:border-rose-400 hover:bg-rose-50 sm:flex-1"
         >
-          Chatbot demo
+          Chatbot demo ↗
         </a>
       </div>
 
-      <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+      <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
         <Card title="TL;DR">
-          <strong className="font-semibold text-sand-800">Poshan Saathi</strong>{" "}
+          <strong className="font-semibold text-sand-700">Poshan Saathi</strong>{" "}
           ("nutrition companion" in Hindi) is a RAG chatbot I built to answer
           pregnancy-nutrition questions for women in India.
         </Card>
@@ -120,24 +144,23 @@ export default function Landing() {
         </Card>
 
         <Card title="My solution">
-          I built a system designed specifically for the Indian pregnant woman,
-          sourcing nutritional guidance directly from India's Ministry of
-          Health, India's FOGSI obstetrics federation, and the WHO as a
-          fallback, while tailoring every answer to the woman's diet, trimester,
-          and medical conditions.
+          I built a system specifically for the Indian pregnant woman, sourcing
+          nutritional guidance directly from India's Ministry of Health, India's
+          FOGSI obstetrics federation, and the WHO as a fallback, while
+          tailoring every answer to the woman's diet, trimester, and medical
+          conditions.
         </Card>
 
         <Card title="Why this problem">
           I was a quarterfinalist for The Gates Foundation's AI Fellow Program
-          (top 20/4500+ applicants, ie top 0.4%) where we were asked to build a
-          prototype of an antenatal chatbot. I chose to bring my prototype to
-          production using state-of-the-art RAG techniques to upskill my AI
-          skillset and to bring a working solution to a real problem! Here's a
-          peek into how I approached this project. 🥰
+          (top 20/4500+ applicants, ie top 0.4%) where we built a prototype of
+          an antenatal chatbot. I chose to bring my prototype to production
+          using state-of-the-art RAG techniques to upskill my AI skillset to a
+          real problem!
         </Card>
       </div>
 
-      <p className="mt-3 text-center text-xs leading-relaxed text-sand-500">
+      <p className="mt-3 text-center text-[0.72rem] tracking-wide text-sand-500">
         Educational portfolio project — not medical advice. Always consult your
         doctor or midwife.
       </p>
